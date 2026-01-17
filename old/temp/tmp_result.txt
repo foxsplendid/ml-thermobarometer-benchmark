@@ -1,0 +1,13 @@
+﻿编码 utf-8-sig 失败: 'utf-8' codec can't decode byte 0xef in position 1: invalid continuation byte
+=== 编码: latin-1 成功 ===
+Shape: (3, 45)
+
+所有列名 (45):
+  0: 'Unnamed: 0'
+编码 latin-1 失败: 'gbk' codec can't encode character '\xef' in position 6: illegal multibyte sequence
+=== 编码: cp1252 成功 ===
+Shape: (3, 45)
+
+所有列名 (45):
+  0: 'Unnamed: 0'
+编码 cp1252 失败: 'gbk' codec can't encode character '\xef' in position 6: illegal multibyte sequence
