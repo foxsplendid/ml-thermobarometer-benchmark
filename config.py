@@ -1,86 +1,86 @@
 # -*- coding: utf-8 -*-
 """
-机器学习温压计评估框架 - 全局配置
-Config: 路径、随机种子、CV参数、数据列定义
+ѧϰѹ - ȫ
+Config: ·ӡCVж
 """
 
 import os
 
 # ============================================================
-# 路径配置
+# ·
 # ============================================================
 
-# 项目根目录（当前文件所在目录）
+# ĿĿ¼ǰļĿ¼
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# 数据文件路径
+# ļ·
 DATA_PATH = os.path.join(PROJECT_ROOT, 'input.csv')
 
-# 输出目录
+# Ŀ¼
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'outputs')
 
-# 模型缓存目录
+# ģͻĿ¼
 CACHE_DIR = os.path.join(OUTPUT_DIR, 'cache')
 
 
 # ============================================================
-# 随机种子与CV配置
+# CV
 # ============================================================
 
 RANDOM_SEED = 42
-N_SPLITS = 5  # 外层 GroupKFold 折数
-INNER_CV_SPLITS = 5  # Stacking 内层 CV 折数
+N_SPLITS = 5  #  GroupKFold 
+INNER_CV_SPLITS = 5  # Stacking ڲ CV 
 
 
 # ============================================================
-# 数据列定义
+# ж
 # ============================================================
 
-# 数据编码
+# ݱ
 DATA_ENCODING = 'latin-1'
 
-# 目标列（温度和压力采用独立链路）
+# ĿУ¶Ⱥѹö·
 TARGET_COLS = {
-    'T': 'T',  # 温度 (℃)
-    'P': 'P',  # 压力 (kbar)
+    'T': 'T',  # ¶ ()
+    'P': 'P',  # ѹ (kbar)
 }
 
-# 分组列（按文献/实验来源分组）
+# У/ʵԴ飩
 GROUP_COL = 'Ref'
 
-# CPX 氧化物特征（12列）
+# CPX 12У
 CPX_OXIDE_COLS = [
     'SiO2.cpx', 'Al2O3.cpx', 'TiO2.cpx', 'CaO.cpx', 'Na2O.cpx', 'K2O.cpx',
     'FeO.cpx', 'MgO.cpx', 'MnO.cpx', 'Cr2O3.cpx', 'NiO.cpx', 'P2O5.cpx'
 ]
 
-# LIQ 氧化物特征（12列）
+# LIQ 12У
 LIQ_OXIDE_COLS = [
     'SiO2.liq', 'Al2O3.liq', 'TiO2.liq', 'CaO.liq', 'Na2O.liq', 'K2O.liq',
     'FeO.liq', 'MgO.liq', 'MnO.liq', 'Cr2O3.liq', 'NiO.liq', 'P2O5.liq'
 ]
 
-# CPX 阳离子特征（12列，6氧基归算）
+# CPX 12У6㣩
 CPX_CATION_COLS = [
     'Si.cpx', 'Al.cpx', 'Ti.cpx', 'Ca.cpx', 'Na.cpx', 'K.cpx',
     'Fe.cpx', 'Mg.cpx', 'Mn.cpx', 'Cr.cpx', 'Ni.cpx', 'P.cpx'
 ]
 
-# 预定义特征集合
+# Ԥ
 FEATURE_SETS = {
     'cpx_oxide': CPX_OXIDE_COLS,
     'liq_oxide': LIQ_OXIDE_COLS,
     'cpx_cation': CPX_CATION_COLS,
-    'cpx_only': CPX_OXIDE_COLS + CPX_CATION_COLS,  # 24列
-    'cpx_liq': CPX_OXIDE_COLS + LIQ_OXIDE_COLS + CPX_CATION_COLS,  # 36列
+    'cpx_only': CPX_OXIDE_COLS + CPX_CATION_COLS,  # 24
+    'cpx_liq': CPX_OXIDE_COLS + LIQ_OXIDE_COLS + CPX_CATION_COLS,  # 36
 }
 
-# 默认特征集合
+# Ĭ
 DEFAULT_FEATURE_MODE = 'cpx_liq'
 
 
 # ============================================================
-# 模型默认参数
+# ģĬϲ
 # ============================================================
 
 CATBOOST_DEFAULT_PARAMS = {
@@ -96,14 +96,15 @@ STACKING_DEFAULT_PARAMS = {
     'inner_cv': INNER_CV_SPLITS,
     'use_scaler': True,
     'random_seed': RANDOM_SEED,
+    'n_jobs': 1,
 }
 
 
 # ============================================================
-# 实验矩阵预定义配置
+# ʵԤ
 # ============================================================
 
-# 4组实验配置
+# 4ʵ
 EXPERIMENT_CONFIGS = {
     'exp1_baseline': {
         'model_type': 'catboost',
@@ -117,7 +118,7 @@ EXPERIMENT_CONFIGS = {
         'augment': True,
         'correct': False,
     },
-    'exp3_corr_only': {  # 新增：仅偏差校正（无增强）
+    'exp3_corr_only': {  # ƫУǿ
         'model_type': 'catboost',
         'model_params': CATBOOST_DEFAULT_PARAMS.copy(),
         'augment': False,
@@ -139,37 +140,37 @@ EXPERIMENT_CONFIGS = {
 
 
 # ============================================================
-# 数据增强配置
+# ǿ
 # ============================================================
 
 AUGMENT_CONFIG = {
     'method': 'noise',
-    'n_aug': 1,  # 增强倍数（最终样本数 = (1 + n_aug) * 原始样本数）
-    'noise_level': 0.02,  # 噪声水平（相对于标准差）
+    'n_aug': 1,  # ǿ = (1 + n_aug) * ԭʼ
+    'noise_level': 0.02,  # ˮƽڱ׼
 }
 
 
 # ============================================================
-# 辅助函数
+# 
 # ============================================================
 
 def get_feature_cols(mode: str = None) -> list:
-    """获取特征列名列表"""
+    """ȡб"""
     mode = mode or DEFAULT_FEATURE_MODE
     if mode not in FEATURE_SETS:
-        raise ValueError(f"未知特征集合: {mode}，支持 {list(FEATURE_SETS.keys())}")
+        raise ValueError(f"δ֪: {mode}֧ {list(FEATURE_SETS.keys())}")
     return FEATURE_SETS[mode]
 
 
 def ensure_dirs():
-    """确保必要目录存在"""
+    """ȷҪĿ¼"""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
 
 
 # ============================================================
-# 模块加载时执行
+# ģʱִ
 # ============================================================
 
-# 确保输出目录存在
+# ȷĿ¼
 ensure_dirs()
