@@ -105,25 +105,31 @@ STACKING_DEFAULT_PARAMS = {
 
 # 4组实验配置
 EXPERIMENT_CONFIGS = {
-    'exp1_catboost_base': {
+    'exp1_baseline': {
         'model_type': 'catboost',
         'model_params': CATBOOST_DEFAULT_PARAMS.copy(),
         'augment': False,
         'correct': False,
     },
-    'exp2_catboost_aug': {
+    'exp2_aug_only': {
         'model_type': 'catboost',
         'model_params': CATBOOST_DEFAULT_PARAMS.copy(),
         'augment': True,
         'correct': False,
     },
-    'exp3_catboost_aug_corr': {
+    'exp3_corr_only': {  # 新增：仅偏差校正（无增强）
+        'model_type': 'catboost',
+        'model_params': CATBOOST_DEFAULT_PARAMS.copy(),
+        'augment': False,
+        'correct': True,
+    },
+    'exp4_aug_corr': {
         'model_type': 'catboost',
         'model_params': CATBOOST_DEFAULT_PARAMS.copy(),
         'augment': True,
         'correct': True,
     },
-    'exp4_stacking_aug_corr': {
+    'exp5_stacking': {
         'model_type': 'stacking',
         'model_params': STACKING_DEFAULT_PARAMS.copy(),
         'augment': True,

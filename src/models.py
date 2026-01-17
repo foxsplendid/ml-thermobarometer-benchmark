@@ -133,6 +133,154 @@ class CatBoostWrapper(BaseThermoModel):
 
 
 # ============================================================
+# ExtraTrees 封装
+# ============================================================
+
+class ExtraTreesWrapper(BaseThermoModel):
+    """
+    ExtraTrees 回归器封装，统一接口
+
+    Parameters
+    ----------
+    n_estimators : int, default=200
+        树的数量
+    max_depth : int, default=10
+        树的最大深度
+    min_samples_split : int, default=2
+        分裂内部节点所需的最小样本数
+    random_state : int, default=42
+        随机种子
+    **kwargs : dict
+        其他 ExtraTreesRegressor 参数
+    """
+
+    def __init__(self, n_estimators: int = 200, max_depth: int = 10,
+                 min_samples_split: int = 2, random_state: int = 42, **kwargs):
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.random_state = random_state
+        self.kwargs = kwargs
+        self._model = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray, groups: Optional[np.ndarray] = None) -> 'ExtraTreesWrapper':
+        """训练 ExtraTrees 模型（groups 参数不使用，仅为接口一致）"""
+        from sklearn.ensemble import ExtraTreesRegressor
+
+        self._model = ExtraTreesRegressor(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            random_state=self.random_state,
+            n_jobs=-1,  # 使用所有CPU核心
+            **self.kwargs
+        )
+        self._model.fit(X, y)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """预测"""
+        if self._model is None:
+            raise RuntimeError("模型未训练，请先调用 fit()")
+        return self._model.predict(X)
+
+    def get_params(self, deep: bool = True) -> Dict[str, Any]:
+        """获取模型参数"""
+        return {
+            'n_estimators': self.n_estimators,
+            'max_depth': self.max_depth,
+            'min_samples_split': self.min_samples_split,
+            'random_state': self.random_state,
+            **self.kwargs
+        }
+
+    def set_params(self, **params) -> 'ExtraTreesWrapper':
+        """设置模型参数"""
+        for key, value in params.items():
+            if key in ['n_estimators', 'max_depth', 'min_samples_split', 'random_state']:
+                setattr(self, key, value)
+            else:
+                self.kwargs[key] = value
+        return self
+
+
+# ============================================================
+# XGBoost 封装
+# ============================================================
+
+class XGBoostWrapper(BaseThermoModel):
+    """
+    XGBoost 回归器封装，统一接口
+
+    Parameters
+    ----------
+    n_estimators : int, default=200
+        提升轮数
+    max_depth : int, default=6
+        树的最大深度
+    learning_rate : float, default=0.05
+        学习率
+    random_state : int, default=42
+        随机种子
+    **kwargs : dict
+        其他 XGBRegressor 参数
+    """
+
+    def __init__(self, n_estimators: int = 200, max_depth: int = 6,
+                 learning_rate: float = 0.05, random_state: int = 42, **kwargs):
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.learning_rate = learning_rate
+        self.random_state = random_state
+        self.kwargs = kwargs
+        self._model = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray, groups: Optional[np.ndarray] = None) -> 'XGBoostWrapper':
+        """训练 XGBoost 模型（groups 参数不使用，仅为接口一致）"""
+        try:
+            from xgboost import XGBRegressor
+        except ImportError:
+            raise ImportError("请先安装 xgboost: pip install xgboost>=1.5")
+
+        self._model = XGBRegressor(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            learning_rate=self.learning_rate,
+            random_state=self.random_state,
+            n_jobs=-1,  # 使用所有CPU核心
+            verbosity=0,  # 静默模式
+            **self.kwargs
+        )
+        self._model.fit(X, y)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """预测"""
+        if self._model is None:
+            raise RuntimeError("模型未训练，请先调用 fit()")
+        return self._model.predict(X)
+
+    def get_params(self, deep: bool = True) -> Dict[str, Any]:
+        """获取模型参数"""
+        return {
+            'n_estimators': self.n_estimators,
+            'max_depth': self.max_depth,
+            'learning_rate': self.learning_rate,
+            'random_state': self.random_state,
+            **self.kwargs
+        }
+
+    def set_params(self, **params) -> 'XGBoostWrapper':
+        """设置模型参数"""
+        for key, value in params.items():
+            if key in ['n_estimators', 'max_depth', 'learning_rate', 'random_state']:
+                setattr(self, key, value)
+            else:
+                self.kwargs[key] = value
+        return self
+
+
+# ============================================================
 # Group-aware OOF Stacking
 # ============================================================
 
@@ -368,28 +516,54 @@ def get_model(name: str, **kwargs) -> BaseThermoModel:
     >>> stacker = get_model('stacking', base_models=[...], inner_cv=5)
     """
     name = name.lower().strip()
-    
+
     if name == 'catboost':
         return CatBoostWrapper(**kwargs)
+    elif name == 'extratrees':
+        return ExtraTreesWrapper(**kwargs)
+    elif name == 'xgboost':
+        return XGBoostWrapper(**kwargs)
     elif name == 'stacking':
         return GroupAwareStacker(**kwargs)
     else:
-        raise ValueError(f"未知模型类型: {name}，支持 'catboost', 'stacking'")
+        raise ValueError(f"未知模型类型: {name}，支持 'catboost', 'extratrees', 'xgboost', 'stacking'")
 
 
-def create_default_stacker(cache_dir: Optional[str] = None, inner_cv: int = 5) -> GroupAwareStacker:
+def create_default_stacker(cache_dir: Optional[str] = None, inner_cv: int = 5, use_heterogeneous: bool = True) -> GroupAwareStacker:
     """
     创建默认配置的 Stacking 模型
-    
-    默认配置：3个不同参数的 CatBoost 作为基模型，1个 CatBoost 作为元模型
+
+    Parameters
+    ----------
+    cache_dir : str, optional
+        元特征缓存目录
+    inner_cv : int, default=5
+        内层 CV 折数
+    use_heterogeneous : bool, default=True
+        是否使用异构基学习器（True: ExtraTrees+XGBoost+CatBoost，False: 3个CatBoost）
+
+    Returns
+    -------
+    GroupAwareStacker
+        配置好的 Stacking 模型
     """
-    base_models = [
-        CatBoostWrapper(iterations=500, depth=4, learning_rate=0.05),
-        CatBoostWrapper(iterations=800, depth=6, learning_rate=0.03),
-        CatBoostWrapper(iterations=1000, depth=8, learning_rate=0.02),
-    ]
-    meta_model = CatBoostWrapper(iterations=300, depth=4, learning_rate=0.05)
-    
+    if use_heterogeneous:
+        # 异构基学习器：ExtraTrees + XGBoost + CatBoost
+        base_models = [
+            ExtraTreesWrapper(n_estimators=200, max_depth=10, random_state=42),
+            XGBoostWrapper(n_estimators=200, max_depth=6, learning_rate=0.05, random_state=42),
+            CatBoostWrapper(iterations=200, depth=6, learning_rate=0.05, random_seed=42),
+        ]
+    else:
+        # 同构基学习器：3个不同参数的 CatBoost
+        base_models = [
+            CatBoostWrapper(iterations=500, depth=4, learning_rate=0.05),
+            CatBoostWrapper(iterations=800, depth=6, learning_rate=0.03),
+            CatBoostWrapper(iterations=1000, depth=8, learning_rate=0.02),
+        ]
+
+    meta_model = CatBoostWrapper(iterations=100, depth=4, learning_rate=0.05)
+
     return GroupAwareStacker(
         base_models=base_models,
         meta_model=meta_model,

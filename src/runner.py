@@ -115,18 +115,11 @@ class SingleTargetRunner:
         )
     
     def _compute_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-        """计算评估指标"""
-        from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-        
-        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-        mae = mean_absolute_error(y_true, y_pred)
-        r2 = r2_score(y_true, y_pred)
-        
-        return {
-            f'rmse_{self.target_name}': rmse,
-            f'mae_{self.target_name}': mae,
-            f'r2_{self.target_name}': r2
-        }
+        """计算评估指标（完整版，包含 slope/intercept/bias_mean/resid_std）"""
+        from .metrics import compute_metrics
+
+        # 使用更新后的 compute_metrics 函数，返回完整指标
+        return compute_metrics(y_true, y_pred, prefix=f'{self.target_name}_')
     
     def run_fold(self, fold_idx: int, X_train: np.ndarray, y_train: np.ndarray, groups_train: np.ndarray,
                  X_val: np.ndarray, y_val: np.ndarray, row_ids_val: np.ndarray, refs_val: np.ndarray,
@@ -198,13 +191,14 @@ class SingleTargetRunner:
         metrics = self._compute_metrics(y_val, y_pred_corr)
         metrics['fold_id'] = fold_idx
         
-        # 7. 构建逐样本预测表
+        # 7. 构建逐样本预测表（包含原始预测、校正预测和残差）
         preds_df = pd.DataFrame({
             'row_id': row_ids_val,
             'Ref': refs_val,
             f'{self.target_name}_true': y_val,
             f'{self.target_name}_pred_raw': y_pred_raw,
             f'{self.target_name}_pred_corr': y_pred_corr,
+            f'{self.target_name}_residual': y_val - y_pred_corr,  # 残差 = 真值 - 校正预测
             'fold_id': fold_idx,
             'exp_name': self.config.exp_name
         })

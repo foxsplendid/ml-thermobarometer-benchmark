@@ -41,15 +41,72 @@ def bias(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return np.mean(y_pred - y_true)
 
 
+def compute_slope_intercept(y_true: np.ndarray, y_pred: np.ndarray) -> tuple:
+    """
+    计算 y_true ~ y_pred 的线性回归斜率和截距
+
+    用于评估校正效果：理想情况下 slope≈1, intercept≈0
+
+    Parameters
+    ----------
+    y_true : np.ndarray
+        真实值
+    y_pred : np.ndarray
+        预测值
+
+    Returns
+    -------
+    slope : float
+        回归斜率
+    intercept : float
+        回归截距
+    """
+    from sklearn.linear_model import LinearRegression
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+
+    lr = LinearRegression()
+    lr.fit(y_pred.reshape(-1, 1), y_true)
+
+    return lr.coef_[0], lr.intercept_
+
+
+def compute_bias_stats(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """
+    计算偏差统计量
+
+    Parameters
+    ----------
+    y_true : np.ndarray
+        真实值
+    y_pred : np.ndarray
+        预测值
+
+    Returns
+    -------
+    stats : dict
+        包含 bias_mean（偏差均值）和 resid_std（残差标准差）
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+
+    residuals = y_true - y_pred
+
+    return {
+        'bias_mean': np.mean(residuals),
+        'resid_std': np.std(residuals, ddof=1)  # 使用样本标准差
+    }
+
+
 # ============================================================
 # 综合指标计算
 # ============================================================
 
-def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, 
+def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                     prefix: str = '') -> Dict[str, float]:
     """
-    计算所有评估指标
-    
+    计算所有评估指标（完整版，包含校正诊断指标）
+
     Parameters
     ----------
     y_true : np.ndarray
@@ -58,21 +115,27 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         预测值
     prefix : str, optional
         指标名称前缀（如 'T_' 或 'P_'）
-    
+
     Returns
     -------
     metrics : dict
-        包含 rmse, mae, r2, mape, bias 的字典
+        包含 rmse, mae, r2, slope, intercept, bias_mean, resid_std 的字典
     """
     y_true = np.asarray(y_true).ravel()
     y_pred = np.asarray(y_pred).ravel()
-    
+
+    # 基础指标
+    slope, intercept = compute_slope_intercept(y_true, y_pred)
+    bias_stats = compute_bias_stats(y_true, y_pred)
+
     return {
         f'{prefix}rmse': rmse(y_true, y_pred),
         f'{prefix}mae': mae(y_true, y_pred),
         f'{prefix}r2': r2(y_true, y_pred),
-        f'{prefix}mape': mape(y_true, y_pred),
-        f'{prefix}bias': bias(y_true, y_pred)
+        f'{prefix}slope': slope,
+        f'{prefix}intercept': intercept,
+        f'{prefix}bias_mean': bias_stats['bias_mean'],
+        f'{prefix}resid_std': bias_stats['resid_std']
     }
 
 
