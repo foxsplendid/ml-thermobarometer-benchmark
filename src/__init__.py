@@ -1,95 +1,88 @@
 # -*- coding: utf-8 -*-
 """
-ѧϰѹ - src ģʼ
-ģĺͺ
+Chapter 3 Benchmark Protocol - 模块导出
+
+机器学习温压计模块化验证框架 v2.0
 """
 
-# ģģ
-from .models import (
-    BaseThermoModel,
-    CatBoostWrapper,
-    GroupAwareStacker,
-    get_model,
-    create_default_stacker
+# ============================================================
+# 接口定义
+# ============================================================
+from .interfaces import (
+    DataModule,
+    ModelModule,
+    CorrectionModule,
+    UncertaintyModule,
+    DataModuleState,
 )
 
-# ģ
-from .runner import (
+# ============================================================
+# M1 数据模块
+# ============================================================
+from .data_modules import (
+    RawDataModule,
+    BalancedDataModule,
+    AugmentedDataModule,
+    get_data_module,
+)
+
+# ============================================================
+# M2 模型模块
+# ============================================================
+from .model_modules import (
+    ExtraTreesModel,
+    CatBoostModel,
+    RandomForestModel,
+    StrictOOFStacking,
+    RidgeModel,
+    get_model_module,
+)
+
+# ============================================================
+# M3 校正模块
+# ============================================================
+from .correction_modules import (
+    NoCorrection,
+    ResidualRegressionCorrector,
+    SegmentedLinearCorrector,
+    get_correction_module,
+)
+
+# ============================================================
+# M4 不确定性模块
+# ============================================================
+from .uncertainty_modules import (
+    MCUncertaintyEstimator,
+    get_uncertainty_module,
+)
+
+# ============================================================
+# Protocol
+# ============================================================
+from .protocol import (
+    Pipeline,
+    GroupCVProtocol,
+    RandomSplitProtocol,
     ExperimentConfig,
-    SingleTargetRunner,
-    ExperimentRunner,
-    run_single_experiment,
-    run_experiment_matrix
+    ExperimentMatrix,
+    compute_all_metrics,
+    summarize_folds,
 )
 
-# ƫУģ
-from .correction import (
-    BiasCorrector,
-    LinearBiasCorrector,
-    IdentityCorrector,
-    PolynomialBiasCorrector,
-    get_corrector
-)
-
-# Ԥģ
-from .preprocessing import (
-    load_data,
-    get_feature_cols,
-    prepare_data,
-    augment_data,
-    augment_noise,
-    FoldScaler,
-    CPX_OXIDE_COLS,
-    LIQ_OXIDE_COLS,
-    CPX_CATION_COLS,
-    FEATURE_SETS
-)
-
-# ָģ
+# ============================================================
+# 指标与可视化
+# ============================================================
 from .metrics import (
     rmse,
     mae,
     r2,
-    mape,
-    bias,
     compute_metrics,
-    compute_metrics_by_target,
-    summarize_folds,
-    print_summary,
-    compare_experiments
+    compute_slope_intercept,
+    compute_bias_stats,
 )
 
-# ӻģ
-from .viz import (
-    plot_pred_vs_true,
-    plot_residuals,
-    plot_fold_comparison,
-    plot_experiment_summary,
-    plot_full_report,
-    save_figure
-)
-
-__all__ = [
-    # ģ
-    'BaseThermoModel', 'CatBoostWrapper', 'GroupAwareStacker', 
-    'get_model', 'create_default_stacker',
-    # 
-    'ExperimentConfig', 'SingleTargetRunner', 'ExperimentRunner',
-    'run_single_experiment', 'run_experiment_matrix',
-    # У
-    'BiasCorrector', 'LinearBiasCorrector', 'IdentityCorrector', 
-    'PolynomialBiasCorrector', 'get_corrector',
-    # Ԥ
-    'load_data', 'get_feature_cols', 'prepare_data', 'augment_data', 
-    'augment_noise', 'FoldScaler',
-    'CPX_OXIDE_COLS', 'LIQ_OXIDE_COLS', 'CPX_CATION_COLS', 'FEATURE_SETS',
-    # ָ
-    'rmse', 'mae', 'r2', 'mape', 'bias',
-    'compute_metrics', 'compute_metrics_by_target', 
-    'summarize_folds', 'print_summary', 'compare_experiments',
-    # ӻ
-    'plot_pred_vs_true', 'plot_residuals', 'plot_fold_comparison',
-    'plot_experiment_summary', 'plot_full_report', 'save_figure'
-]
-
-__version__ = '0.1.0'
+# ============================================================
+# 版本信息
+# ============================================================
+__version__ = '2.0.0'
+__author__ = 'ML Thermobarometer Benchmark Protocol'
