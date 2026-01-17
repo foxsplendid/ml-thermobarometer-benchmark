@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-机器学习温压计评估框架 - src 模块初始化
-导出所有子模块的核心类和函数
+ѧϰѹ - src ģʼ
+ģĺͺ
 """
 
-# 模型模块
+# ģģ
 from .models import (
     BaseThermoModel,
     CatBoostWrapper,
@@ -13,7 +13,7 @@ from .models import (
     create_default_stacker
 )
 
-# 运行器模块
+# ģ
 from .runner import (
     ExperimentConfig,
     SingleTargetRunner,
@@ -22,7 +22,7 @@ from .runner import (
     run_experiment_matrix
 )
 
-# 偏差校正模块
+# ƫУģ
 from .correction import (
     BiasCorrector,
     LinearBiasCorrector,
@@ -31,7 +31,7 @@ from .correction import (
     get_corrector
 )
 
-# 预处理模块
+# Ԥģ
 from .preprocessing import (
     load_data,
     get_feature_cols,
@@ -45,7 +45,7 @@ from .preprocessing import (
     FEATURE_SETS
 )
 
-# 指标模块
+# ָģ
 from .metrics import (
     rmse,
     mae,
@@ -59,7 +59,7 @@ from .metrics import (
     compare_experiments
 )
 
-# 可视化模块
+# ӻģ
 from .viz import (
     plot_pred_vs_true,
     plot_residuals,
@@ -70,24 +70,24 @@ from .viz import (
 )
 
 __all__ = [
-    # 模型
+    # ģ
     'BaseThermoModel', 'CatBoostWrapper', 'GroupAwareStacker', 
     'get_model', 'create_default_stacker',
-    # 运行器
+    # 
     'ExperimentConfig', 'SingleTargetRunner', 'ExperimentRunner',
     'run_single_experiment', 'run_experiment_matrix',
-    # 校正
+    # У
     'BiasCorrector', 'LinearBiasCorrector', 'IdentityCorrector', 
     'PolynomialBiasCorrector', 'get_corrector',
-    # 预处理
+    # Ԥ
     'load_data', 'get_feature_cols', 'prepare_data', 'augment_data', 
     'augment_noise', 'FoldScaler',
     'CPX_OXIDE_COLS', 'LIQ_OXIDE_COLS', 'CPX_CATION_COLS', 'FEATURE_SETS',
-    # 指标
+    # ָ
     'rmse', 'mae', 'r2', 'mape', 'bias',
     'compute_metrics', 'compute_metrics_by_target', 
     'summarize_folds', 'print_summary', 'compare_experiments',
-    # 可视化
+    # ӻ
     'plot_pred_vs_true', 'plot_residuals', 'plot_fold_comparison',
     'plot_experiment_summary', 'plot_full_report', 'save_figure'
 ]
