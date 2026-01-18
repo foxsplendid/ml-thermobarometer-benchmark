@@ -12,7 +12,7 @@ Model Modules: ExtraTreesModel, CatBoostModel, StrictOOFStacking
 import time
 import numpy as np
 from typing import Any, Dict, List, Optional
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from .interfaces import ModelModule
@@ -36,7 +36,7 @@ class ExtraTreesModel(ModelModule):
                  n_estimators: int = 200,
                  max_depth: int = 15,
                  min_samples_split: int = 5,
-                 n_jobs: int = -1,
+                 n_jobs: int = 1,
                  random_state: int = 42,
                  **kwargs):
         self.params = {
@@ -53,7 +53,8 @@ class ExtraTreesModel(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None) -> Any:
+            groups: Optional[np.ndarray] = None,
+            stratify_labels: Optional[np.ndarray] = None) -> Any:
         """训练 ExtraTrees 模型"""
         from sklearn.ensemble import ExtraTreesRegressor
         
@@ -111,7 +112,8 @@ class CatBoostModel(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None) -> Any:
+            groups: Optional[np.ndarray] = None,
+            stratify_labels: Optional[np.ndarray] = None) -> Any:
         """训练 CatBoost 模型"""
         from catboost import CatBoostRegressor, Pool
         
@@ -146,7 +148,7 @@ class RandomForestModel(ModelModule):
                  n_estimators: int = 200,
                  max_depth: int = 15,
                  min_samples_split: int = 5,
-                 n_jobs: int = -1,
+                 n_jobs: int = 1,
                  random_state: int = 42,
                  **kwargs):
         self.params = {
@@ -163,7 +165,8 @@ class RandomForestModel(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None) -> Any:
+            groups: Optional[np.ndarray] = None,
+            stratify_labels: Optional[np.ndarray] = None) -> Any:
         """训练 RandomForest 模型"""
         from sklearn.ensemble import RandomForestRegressor
         
@@ -251,7 +254,8 @@ class StrictOOFStacking(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None) -> Dict[str, Any]:
+            groups: Optional[np.ndarray] = None,
+            stratify_labels: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         训练 Stacking 模型
         
@@ -270,10 +274,25 @@ class StrictOOFStacking(ModelModule):
         n_base = len(self.base_models)
         
         # 1. 使用 inner KFold 生成 OOF 元特征（严格 OOF！）
-        kf = KFold(n_splits=self.inner_cv, shuffle=True, random_state=self.random_seed)
+        # 注意：不再使用GroupKFold，仅使用StratifiedKFold进行P-T分层
+        if stratify_labels is not None:
+            splitter = StratifiedKFold(
+                n_splits=self.inner_cv,
+                shuffle=True,
+                random_state=self.random_seed
+            )
+            split_iter = splitter.split(X_train, stratify_labels)
+        else:
+            splitter = KFold(
+                n_splits=self.inner_cv,
+                shuffle=True,
+                random_state=self.random_seed
+            )
+            split_iter = splitter.split(X_train)
+
         oof_meta = np.zeros((n_samples, n_base))
         
-        for fold_idx, (inner_train_idx, inner_val_idx) in enumerate(kf.split(X_train)):
+        for fold_idx, (inner_train_idx, inner_val_idx) in enumerate(split_iter):
             X_it, y_it = X_train[inner_train_idx], y_train[inner_train_idx]
             X_iv = X_train[inner_val_idx]
             
@@ -332,30 +351,32 @@ class StrictOOFStacking(ModelModule):
         # 3. 元模型预测
         return self.meta_model.predict(model_dict['meta'], meta_scaled)
     
-    def get_oof_predictions(self, 
+    def get_oof_predictions(self,
                             model: Dict[str, Any],
-                            X_train: np.ndarray, 
-                            y_train: np.ndarray, 
-                            groups: np.ndarray,
-                            sample_weights: Optional[np.ndarray] = None
+                            X_train: np.ndarray,
+                            y_train: np.ndarray,
+                            groups: Optional[np.ndarray] = None,
+                            sample_weights: Optional[np.ndarray] = None,
+                            stratify_labels: Optional[np.ndarray] = None
                             ) -> np.ndarray:
         """
         返回严格 OOF 预测（用于偏差校正）
-        
+
         注意：此方法返回的是在 fit() 过程中已生成的 OOF 预测
         （通过 inner CV 生成的元特征，再经过 meta-learner 预测）
+        stratify_labels 参数在此处未使用，因为 OOF 已经在 fit() 时生成。
         """
         # 使用已存储的 OOF 元特征
         if self._oof_meta_features is None:
             # 如果没有存储，需要重新计算（不推荐）
             return self.predict(model, X_train)
-        
+
         # 标准化元特征
         if self._meta_scaler is not None:
             oof_scaled = self._meta_scaler.transform(self._oof_meta_features)
         else:
             oof_scaled = self._oof_meta_features
-        
+
         # 元模型预测
         return self.meta_model.predict(model['meta'], oof_scaled)
     
@@ -385,7 +406,8 @@ class RidgeModel(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None) -> Any:
+            groups: Optional[np.ndarray] = None,
+            stratify_labels: Optional[np.ndarray] = None) -> Any:
         """训练 Ridge 模型"""
         from sklearn.linear_model import Ridge
         

@@ -4,8 +4,15 @@ Chapter 3 Benchmark Protocol - M3 校正模块实现
 Correction Modules: NoCorrection, ResidualRegressionCorrector
 
 核心约束：
-1. fit() 必须使用 OOF 预测，禁止使用 in-sample 预测
+1. fit() 应优先使用 OOF 预测以避免过拟合
 2. 校正模型只能在训练折的（真值，OOF预测）上拟合
+
+【地质学ML传统实践说明】
+在地质学领域的机器学习实践中，简单模型（ERT、CatBoost、RandomForest）的
+偏差校正器通常使用in-sample预测进行训练。这种做法风险较低但理论上可能
+导致轻微过拟合。StrictOOFStacking使用严格的内层CV生成OOF预测，避免此问题。
+
+详见 interfaces.py 中 ModelModule.get_oof_predictions() 的说明。
 """
 
 import numpy as np
