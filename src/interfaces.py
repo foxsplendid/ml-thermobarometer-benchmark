@@ -127,11 +127,12 @@ class ModelModule(ABC):
     """
     
     @abstractmethod
-    def fit(self, 
-            X_train: np.ndarray, 
+    def fit(self,
+            X_train: np.ndarray,
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None) -> Any:
+            groups: Optional[np.ndarray] = None,
+            stratify_labels: Optional[np.ndarray] = None) -> Any:
         """
         训练模型
         
@@ -172,21 +173,45 @@ class ModelModule(ABC):
         """
         pass
     
-    def get_oof_predictions(self, 
+    def get_oof_predictions(self,
                             model: Any,
-                            X_train: np.ndarray, 
-                            y_train: np.ndarray, 
-                            groups: np.ndarray,
-                            sample_weights: Optional[np.ndarray] = None
+                            X_train: np.ndarray,
+                            y_train: np.ndarray,
+                            groups: Optional[np.ndarray] = None,
+                            sample_weights: Optional[np.ndarray] = None,
+                            stratify_labels: Optional[np.ndarray] = None
                             ) -> np.ndarray:
         """
         获取训练集 OOF 预测（用于偏差校正器拟合）
-        
-        默认实现：返回 in-sample 预测（非严格 OOF，仅用于非 Stacking 模型）
-        Stacking 模型应重写此方法，返回真正的 inner OOF 预测
-        
-        警告：使用 in-sample 预测会导致偏差校正过拟合，但对于
-              简单模型（ERT, CatBoost）风险较低
+
+        默认实现：返回 in-sample 预测（非严格 OOF）
+
+        【地质学ML传统做法说明】
+        在地质学机器学习领域，传统做法是在外层划分基础上使用内层CV进行模型训练，
+        但偏差校正器通常直接使用in-sample预测而非严格OOF预测。这种做法在实践中
+        风险较低（对于简单模型如ERT、CatBoost），但理论上可能导致校正器轻微过拟合。
+
+        StrictOOFStacking模型会重写此方法，返回真正的inner OOF预测。
+
+        Parameters
+        ----------
+        model : Any
+            训练好的模型
+        X_train : np.ndarray
+            训练集特征
+        y_train : np.ndarray
+            训练集目标
+        groups : np.ndarray, optional
+            分组标签（已废弃，保留向后兼容）
+        sample_weights : np.ndarray, optional
+            样本权重
+        stratify_labels : np.ndarray, optional
+            分层标签（用于内层CV，如有）
+
+        Returns
+        -------
+        y_oof : np.ndarray
+            OOF预测（默认实现返回in-sample预测）
         """
         return self.predict(model, X_train)
     

@@ -18,7 +18,7 @@ import pandas as pd
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from sklearn.model_selection import GroupKFold, train_test_split
+from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from .interfaces import DataModule, ModelModule, CorrectionModule, UncertaintyModule, DataModuleState
 
@@ -54,7 +54,8 @@ class Pipeline:
     def fit(self,
             X_train: np.ndarray,
             y_train: np.ndarray,
-            groups_train: np.ndarray) -> 'Pipeline':
+            groups_train: np.ndarray,
+            stratify_labels: Optional[np.ndarray] = None) -> 'Pipeline':
         """
         训练完整管道
         
@@ -76,16 +77,28 @@ class Pipeline:
             groups2 = np.tile(groups_train, n_aug)
         else:
             groups2 = groups_train
+
+        if stratify_labels is not None:
+            if len(y2) > len(stratify_labels):
+                n_aug = len(y2) // len(stratify_labels)
+                stratify2 = np.tile(stratify_labels, n_aug)
+            else:
+                stratify2 = stratify_labels
+        else:
+            stratify2 = None
         
         # 2. 模型训练
-        self._model = self.model_module.fit(X2, y2, weights, groups2)
+        self._model = self.model_module.fit(X2, y2, weights, groups2, stratify_labels=stratify2)
         
         # 3. 获取 OOF 预测（用于偏差校正）
+        # 注意：简单模型（ERT/CatBoost）使用in-sample预测（地质学ML传统做法）
+        # StrictOOFStacking使用真正的inner CV OOF预测
         y_oof = self.model_module.get_oof_predictions(
-            self._model, X2, y2, groups2, weights
+            self._model, X2, y2, groups2, weights, stratify_labels=stratify2
         )
-        
+
         # 4. 拟合偏差校正器
+        # 警告：如果y_oof是in-sample预测，校正器可能轻微过拟合
         self._corr_model = self.corr_module.fit(y2, y_oof)
         
         self._is_fitted = True
@@ -300,8 +313,10 @@ class GroupCVProtocol:
             X: np.ndarray,
             y: np.ndarray,
             groups: np.ndarray,
-            pipeline_factory: Callable[[], Pipeline],
+            pipeline_factory: Callable[..., Pipeline],
             uncertainty_module: Optional[UncertaintyModule] = None,
+            corr_module: Optional[CorrectionModule] = None,
+            stratify_labels: Optional[np.ndarray] = None,
             verbose: bool = True) -> Dict[str, Any]:
         """
         执行 Group K-Fold CV
@@ -331,91 +346,132 @@ class GroupCVProtocol:
                 'uncertainty': dict or None,   # 不确定性结果
             }
         """
-        gkf = GroupKFold(n_splits=self.n_splits)
-        
-        fold_metrics = []
-        all_predictions = []
+        # 使用StratifiedKFold（不再使用GroupKFold）
+        # 注意：移除Ref分组约束，优先保证P-T分布平衡
+        if stratify_labels is None:
+            splitter = KFold(
+                n_splits=self.n_splits,
+                shuffle=True,
+                random_state=self.random_seed
+            )
+            split_iter = splitter.split(X)
+        else:
+            splitter = StratifiedKFold(
+                n_splits=self.n_splits,
+                shuffle=True,
+                random_state=self.random_seed
+            )
+            split_iter = splitter.split(X, stratify_labels)
+
+        oof_pred_raw = np.full(len(y), np.nan, dtype=np.float64)
+        fold_records = []
         training_times = []
-        
-        for fold_idx, (train_idx, val_idx) in enumerate(gkf.split(X, y, groups)):
+
+        for fold_idx, (train_idx, val_idx) in enumerate(split_iter):
             if verbose:
                 print(f"  Fold {fold_idx + 1}/{self.n_splits}: ", end="")
-            
+
             start_time = time.time()
-            
-            # 切分数据
+
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
             groups_train = groups[train_idx]
-            
-            # 创建并训练 pipeline
-            pipeline = pipeline_factory()
-            pipeline.fit(X_train, y_train, groups_train)
-            
-            # 变换验证集
+            stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
+
+            try:
+                pipeline = pipeline_factory(self.random_seed)
+            except TypeError:
+                pipeline = pipeline_factory()
+
+            pipeline.fit(X_train, y_train, groups_train, stratify_labels=stratify_train)
+
             X_val_scaled, _ = pipeline.data_module.transform(X_val, pipeline._state)
-            
-            # 预测
             y_pred_raw = pipeline.predict(X_val_scaled, apply_correction=False)
-            y_pred_corr = pipeline.predict(X_val_scaled, apply_correction=True)
-            
+
+            oof_pred_raw[val_idx] = y_pred_raw
+
             fold_time = time.time() - start_time
             training_times.append(fold_time)
-            
-            # 计算指标
-            metrics = compute_all_metrics(y_val, y_pred_corr, y_pred_raw)
-            metrics['fold_id'] = fold_idx
-            metrics['training_time'] = fold_time
-            fold_metrics.append(metrics)
-            
-            if verbose:
-                print(f"RMSE={metrics['rmse']:.3f}, R²={metrics['r2']:.4f}")
-            
-            # 保存预测
-            preds_df = pd.DataFrame({
+
+            fold_records.append({
                 'fold_id': fold_idx,
-                'sample_idx': val_idx,
-                'y_true': y_val,
+                'val_idx': val_idx,
+                'y_val': y_val,
                 'y_pred_raw': y_pred_raw,
+                'pipeline': pipeline,
+                'X_val': X_val,
+                'training_time': fold_time,
+            })
+
+        if np.any(np.isnan(oof_pred_raw)):
+            raise RuntimeError("OOF prediction contains NaN values.")
+
+        if corr_module is None:
+            from .correction_modules import NoCorrection
+            corr_module = NoCorrection()
+
+        corr_model = corr_module.fit(y, oof_pred_raw)
+
+        fold_metrics = []
+        all_predictions = []
+
+        for record in fold_records:
+            y_pred_corr = corr_module.apply(corr_model, record['y_pred_raw'])
+            metrics = compute_all_metrics(record['y_val'], y_pred_corr, record['y_pred_raw'])
+            metrics['fold_id'] = record['fold_id']
+            metrics['training_time'] = record['training_time']
+            fold_metrics.append(metrics)
+
+            if verbose:
+                print(f"RMSE={metrics['rmse']:.3f}, R2={metrics['r2']:.4f}")
+
+            preds_df = pd.DataFrame({
+                'fold_id': record['fold_id'],
+                'sample_idx': record['val_idx'],
+                'y_true': record['y_val'],
+                'y_pred_raw': record['y_pred_raw'],
                 'y_pred_corr': y_pred_corr,
-                'residual': y_val - y_pred_corr,
+                'residual': record['y_val'] - y_pred_corr,
             })
             all_predictions.append(preds_df)
-        
-        # 汇总
+
         predictions_df = pd.concat(all_predictions, ignore_index=True)
         summary = summarize_folds(fold_metrics)
         summary['total_training_time'] = sum(training_times)
-        
-        # 不确定性估计（在最后一折的 pipeline 上执行）
+
         uncertainty_results = None
         if uncertainty_module is not None:
             if verbose:
-                print("  运行 MC 不确定性估计...")
-            
-            # 使用最后一折的验证集
-            X_val_last = X[val_idx]
-            y_val_last = y[val_idx]
-            
-            dist = uncertainty_module.predict_distribution(pipeline, X_val_last)
-            calib_metrics = uncertainty_module.compute_calibration_metrics(y_val_last, dist)
-            
+                print("  Running MC uncertainty across folds...")
+
+            unc_fold_metrics = []
+            for record in fold_records:
+                pipeline = record['pipeline']
+                pipeline.corr_module = corr_module
+                pipeline._corr_model = corr_model
+
+                dist = uncertainty_module.predict_distribution(pipeline, record['X_val'])
+                calib_metrics = uncertainty_module.compute_calibration_metrics(record['y_val'], dist)
+                calib_metrics['fold_id'] = record['fold_id']
+                unc_fold_metrics.append(calib_metrics)
+
+            unc_summary = summarize_folds(unc_fold_metrics)
+            for k, v in unc_summary.items():
+                summary[f"unc_{k}"] = v
+
             uncertainty_results = {
-                'distribution': dist,
-                'calibration_metrics': calib_metrics,
+                'fold_metrics': pd.DataFrame(unc_fold_metrics),
+                'summary': unc_summary,
             }
-            
-            # 添加到汇总
-            for k, v in calib_metrics.items():
-                summary[f'unc_{k}'] = v
-        
+
         return {
             'fold_metrics': pd.DataFrame(fold_metrics),
             'predictions': predictions_df,
             'summary': summary,
             'uncertainty': uncertainty_results,
+            'corr_module': corr_module,
+            'corr_model': corr_model,
         }
-
 
 # ============================================================
 # Random Split Protocol（对照协议）
@@ -490,6 +546,7 @@ class ExperimentConfig:
     data_module_name: str          # M1 数据模块名称
     model_module_name: str         # M2 模型模块名称
     corr_module_name: str          # M3 校正模块名称
+    feature_set: str = 'Liquid'    # 特征集选择：'NoLiquid' 或 'Liquid'
     data_params: Dict = field(default_factory=dict)
     model_params: Dict = field(default_factory=dict)
     corr_params: Dict = field(default_factory=dict)
@@ -540,6 +597,8 @@ class ExperimentMatrix:
     def run_experiments(self,
                         configs: List[ExperimentConfig],
                         n_splits: int = 10,
+                        stratify_labels: Optional[np.ndarray] = None,
+                        random_seed: int = 42,
                         verbose: bool = True) -> pd.DataFrame:
         """
         运行实验矩阵
@@ -563,18 +622,34 @@ class ExperimentMatrix:
             print(f"{'='*60}")
             
             # 创建 pipeline 工厂
+            def apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str, Any]:
+                updated = dict(params)
+                for key in keys:
+                    if key not in updated:
+                        updated[key] = seed
+                return updated
+
             def make_pipeline_factory(cfg):
-                def factory():
-                    data_mod = get_data_module(cfg.data_module_name, **cfg.data_params)
-                    model_mod = get_model_module(cfg.model_module_name, **cfg.model_params)
+                def factory(seed: Optional[int] = None):
+                    seed_value = random_seed if seed is None else seed
+
+                    data_params = apply_seed(cfg.data_params, ['random_seed'], seed_value)
+                    model_params = dict(cfg.model_params)
+                    if cfg.model_module_name.lower() in ['ert', 'extratrees', 'rf', 'randomforest']:
+                        model_params = apply_seed(model_params, ['random_state'], seed_value)
+                    else:
+                        model_params = apply_seed(model_params, ['random_seed'], seed_value)
+
+                    data_mod = get_data_module(cfg.data_module_name, **data_params)
+                    model_mod = get_model_module(cfg.model_module_name, **model_params)
                     corr_mod = get_correction_module(cfg.corr_module_name, **cfg.corr_params)
                     return Pipeline(data_mod, model_mod, corr_mod)
                 return factory
-            
+
             pipeline_factory = make_pipeline_factory(config)
             
             # 不确定性模块
-            unc_module = MCUncertaintyEstimator() if config.run_uncertainty else None
+            unc_module = MCUncertaintyEstimator(random_seed=random_seed) if config.run_uncertainty else None
             
             # 运行两个目标（T 和 P）
             exp_result = {'exp_id': config.exp_id}
@@ -583,11 +658,14 @@ class ExperimentMatrix:
                 print(f"\n--- 目标: {target_name} ---")
                 
                 # 主协议
-                protocol = GroupCVProtocol(n_splits=n_splits)
+                protocol = GroupCVProtocol(n_splits=n_splits, random_seed=random_seed)
+                corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
                 results = protocol.run(
                     self.X, y, self.groups,
                     pipeline_factory,
                     uncertainty_module=unc_module,
+                    corr_module=corr_module,
+                    stratify_labels=stratify_labels,
                     verbose=verbose
                 )
                 
@@ -631,6 +709,124 @@ class ExperimentMatrix:
         
         return summary_df
     
+    def run_stability_repeats(self,
+                              configs: List[ExperimentConfig],
+                              X_test: np.ndarray,
+                              y_T_test: np.ndarray,
+                              y_P_test: np.ndarray,
+                              groups_test: np.ndarray,
+                              stratify_labels: Optional[np.ndarray] = None,
+                              n_splits: int = 10,
+                              test_size: float = 0.3,
+                              n_repeats: int = 1000,
+                              random_seed: int = 0,
+                              verbose: bool = True) -> pd.DataFrame:
+        from .data_modules import get_data_module
+        from .model_modules import get_model_module
+        from .correction_modules import get_correction_module
+
+        stability_dir = os.path.join(self.output_dir, 'stability')
+        os.makedirs(stability_dir, exist_ok=True)
+
+        summary_rows = []
+
+        for config in configs:
+            print(f"\n{'='*60}")
+            print(f"Stability: {config.exp_id}")
+            print(f"Config: {config.data_module_name} + {config.model_module_name} + {config.corr_module_name}")
+            print(f"{'='*60}")
+
+            def apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str, Any]:
+                updated = dict(params)
+                for key in keys:
+                    if key not in updated:
+                        updated[key] = seed
+                return updated
+
+            def make_pipeline_factory(cfg):
+                def factory(seed: Optional[int] = None):
+                    seed_value = random_seed if seed is None else seed
+
+                    data_params = apply_seed(cfg.data_params, ['random_seed'], seed_value)
+                    model_params = dict(cfg.model_params)
+                    if cfg.model_module_name.lower() in ['ert', 'extratrees', 'rf', 'randomforest']:
+                        model_params = apply_seed(model_params, ['random_state'], seed_value)
+                    else:
+                        model_params = apply_seed(model_params, ['random_seed'], seed_value)
+
+                    data_mod = get_data_module(cfg.data_module_name, **data_params)
+                    model_mod = get_model_module(cfg.model_module_name, **model_params)
+                    corr_mod = get_correction_module(cfg.corr_module_name, **cfg.corr_params)
+                    return Pipeline(data_mod, model_mod, corr_mod)
+                return factory
+
+            pipeline_factory = make_pipeline_factory(config)
+            corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
+
+            for target_name, y_full, y_test in [('T', self.y_T, y_T_test), ('P', self.y_P, y_P_test)]:
+                repeat_metrics = []
+                idx_all = np.arange(len(self.X))
+
+                for i in range(n_repeats):
+                    seed = random_seed + i
+                    train_idx, _ = train_test_split(
+                        idx_all,
+                        test_size=test_size,
+                        random_state=seed
+                    )
+
+                    X_train = self.X[train_idx]
+                    y_train = y_full[train_idx]
+                    groups_train = self.groups[train_idx]
+                    stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
+
+                    protocol = GroupCVProtocol(n_splits=n_splits, random_seed=seed)
+                    cv_results = protocol.run(
+                        X_train,
+                        y_train,
+                        groups_train,
+                        pipeline_factory,
+                        uncertainty_module=None,
+                        corr_module=corr_module,
+                        stratify_labels=stratify_train,
+                        verbose=False
+                    )
+                    corr_model = cv_results['corr_model']
+
+                    pipeline = pipeline_factory(seed)
+                    pipeline.fit(X_train, y_train, groups_train, stratify_labels=stratify_train)
+                    pipeline.corr_module = corr_module
+                    pipeline._corr_model = corr_model
+
+                    X_test_scaled, _ = pipeline.data_module.transform(X_test, pipeline._state)
+                    y_pred_raw = pipeline.predict(X_test_scaled, apply_correction=False)
+                    y_pred_corr = corr_module.apply(corr_model, y_pred_raw)
+
+                    metrics = compute_all_metrics(y_test, y_pred_corr, y_pred_raw)
+                    metrics['repeat_id'] = i
+                    repeat_metrics.append(metrics)
+
+                    if verbose and (i + 1) % 50 == 0:
+                        print(f"  Repeat {i + 1}/{n_repeats}")
+
+                repeat_df = pd.DataFrame(repeat_metrics)
+                repeat_df.to_csv(
+                    os.path.join(stability_dir, f'{config.exp_id}_{target_name}_test_metrics.csv'),
+                    index=False
+                )
+
+                summary = summarize_folds(repeat_metrics, compute_ci=True)
+                summary_row = {'exp_id': config.exp_id, 'target': target_name}
+                summary_row.update(summary)
+                summary_rows.append(summary_row)
+
+        summary_df = pd.DataFrame(summary_rows)
+        summary_df.to_csv(
+            os.path.join(stability_dir, 'stability_summary.csv'),
+            index=False
+        )
+
+        return summary_df
     def compute_effect_table(self, summary_df: pd.DataFrame) -> pd.DataFrame:
         """
         计算模块效应表
