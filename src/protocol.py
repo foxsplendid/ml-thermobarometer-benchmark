@@ -22,7 +22,6 @@ from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from .interfaces import DataModule, ModelModule, CorrectionModule, UncertaintyModule, DataModuleState
 
-
 # ============================================================
 # Pipeline 类
 # ============================================================
@@ -155,7 +154,6 @@ class Pipeline:
         """返回管道名称"""
         return f"{self.data_module.get_name()}_{self.model_module.get_name()}_{self.corr_module.get_name()}"
 
-
 # ============================================================
 # 指标计算函数
 # ============================================================
@@ -241,7 +239,6 @@ def compute_all_metrics(y_true: np.ndarray,
     
     return metrics
 
-
 def summarize_folds(fold_metrics: List[Dict[str, float]],
                     compute_ci: bool = True,
                     ci_level: float = 0.95) -> Dict[str, float]:
@@ -287,7 +284,6 @@ def summarize_folds(fold_metrics: List[Dict[str, float]],
             summary[f'{col}_ci_upper'] = summary[f'{col}_mean'] + t_val * se
     
     return summary
-
 
 # ============================================================
 # Group CV Protocol（主协议）
@@ -414,9 +410,27 @@ class GroupCVProtocol:
 
         fold_metrics = []
         all_predictions = []
+        unc_fold_metrics = [] if uncertainty_module is not None else None
+
+        if uncertainty_module is not None and verbose:
+            print("  Running MC uncertainty across folds...")
 
         for record in fold_records:
             y_pred_corr = corr_module.apply(corr_model, record['y_pred_raw'])
+            dist = None
+
+            if uncertainty_module is not None:
+                pipeline = record['pipeline']
+                pipeline.corr_module = corr_module
+                pipeline._corr_model = corr_model
+
+                dist = uncertainty_module.predict_distribution(pipeline, record['X_val'])
+                y_pred_corr = dist.get('median', y_pred_corr)
+
+                calib_metrics = uncertainty_module.compute_calibration_metrics(record['y_val'], dist)
+                calib_metrics['fold_id'] = record['fold_id']
+                unc_fold_metrics.append(calib_metrics)
+
             metrics = compute_all_metrics(record['y_val'], y_pred_corr, record['y_pred_raw'])
             metrics['fold_id'] = record['fold_id']
             metrics['training_time'] = record['training_time']
@@ -425,36 +439,25 @@ class GroupCVProtocol:
             if verbose:
                 print(f"RMSE={metrics['rmse']:.3f}, R2={metrics['r2']:.4f}")
 
-            preds_df = pd.DataFrame({
+            preds_payload = {
                 'fold_id': record['fold_id'],
                 'sample_idx': record['val_idx'],
                 'y_true': record['y_val'],
                 'y_pred_raw': record['y_pred_raw'],
                 'y_pred_corr': y_pred_corr,
                 'residual': record['y_val'] - y_pred_corr,
-            })
-            all_predictions.append(preds_df)
+                'y_pred_p16': dist.get('p16') if dist is not None else np.nan,
+                'y_pred_p84': dist.get('p84') if dist is not None else np.nan,
+                'y_pred_median': dist.get('median', y_pred_corr) if dist is not None else np.nan,
+            }
+            all_predictions.append(pd.DataFrame(preds_payload))
 
         predictions_df = pd.concat(all_predictions, ignore_index=True)
         summary = summarize_folds(fold_metrics)
         summary['total_training_time'] = sum(training_times)
 
         uncertainty_results = None
-        if uncertainty_module is not None:
-            if verbose:
-                print("  Running MC uncertainty across folds...")
-
-            unc_fold_metrics = []
-            for record in fold_records:
-                pipeline = record['pipeline']
-                pipeline.corr_module = corr_module
-                pipeline._corr_model = corr_model
-
-                dist = uncertainty_module.predict_distribution(pipeline, record['X_val'])
-                calib_metrics = uncertainty_module.compute_calibration_metrics(record['y_val'], dist)
-                calib_metrics['fold_id'] = record['fold_id']
-                unc_fold_metrics.append(calib_metrics)
-
+        if unc_fold_metrics is not None:
             unc_summary = summarize_folds(unc_fold_metrics)
             for k, v in unc_summary.items():
                 summary[f"unc_{k}"] = v
@@ -534,7 +537,6 @@ class RandomSplitProtocol:
             'summary': summarize_folds(repeat_metrics),
         }
 
-
 # ============================================================
 # 实验矩阵执行器
 # ============================================================
@@ -552,7 +554,6 @@ class ExperimentConfig:
     corr_params: Dict = field(default_factory=dict)
     run_uncertainty: bool = False  # 是否运行 M4
     run_random_split: bool = False # 是否运行对照
-
 
 class ExperimentMatrix:
     """

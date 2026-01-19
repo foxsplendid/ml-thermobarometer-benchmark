@@ -145,90 +145,137 @@ class BalancedDataModule(DataModule):
 
 class AugmentedDataModule(DataModule):
     """
-    增强数据模块 - 基于蒙特卡洛的数据增强
-    
-    策略：
-    1. 对每个原始样本生成 n_aug 个扰动副本
-    2. 扰动方式：在原始空间添加高斯噪声（相对于特征标准差）
-    3. 扰动后的样本与原始样本一起用于训练
-    
-    注意：
-    - 增强只在训练折进行，验证折不增强
-    - 增强后样本数 = (1 + n_aug) × 原始样本数
-    - 增强样本与原始样本使用相同的目标值
+    Augmented data module with EPMA-style perturbations.
+
+    Strategy:
+    1. Generate n_aug perturbations per sample.
+    2. EPMA relative error model (>1 wt%: 3%, <=1 wt%: 8%).
+    3. Use the same targets for perturbed samples.
+
+    Notes:
+    - Augmentation only happens within training folds.
+    - Augmented size = (1 + n_aug) * original size.
     """
-    
-    def __init__(self, 
-                 n_aug: int = 5, 
+
+    def __init__(
+                 self, 
+                 n_aug: int = 15,
                  noise_level: float = 0.02,
-                 random_seed: int = 42):
+                 random_seed: int = 42,
+                 error_model: str = 'epma',
+                 rel_err_high: float = 0.03,
+                 rel_err_low: float = 0.08,
+                 error_threshold: float = 1.0,
+                 clip_min: Optional[float] = 0.0):
         """
         Parameters
         ----------
         n_aug : int
-            每个样本生成的增强副本数
+            Number of augmented samples per original sample.
         noise_level : float
-            噪声水平（相对于特征标准差的比例）
+            Gaussian noise level (fallback when error_model != "epma").
+        error_model : str
+            "epma" for EPMA-style relative error, otherwise Gaussian.
+        rel_err_high : float
+            Relative error for values > error_threshold.
+        rel_err_low : float
+            Relative error for values <= error_threshold.
+        error_threshold : float
+            Threshold in wt% to switch relative error.
+        clip_min : float or None
+            Minimum value after perturbation; None disables clipping.
         """
         self.n_aug = n_aug
         self.noise_level = noise_level
         self.random_seed = random_seed
-    
-    def fit_transform(self, 
+        self.error_model = error_model.lower().strip() if isinstance(error_model, str) else "epma"
+        self.rel_err_high = rel_err_high
+        self.rel_err_low = rel_err_low
+        self.error_threshold = error_threshold
+        self.clip_min = clip_min
+
+    def _epma_perturb(self, X_raw: np.ndarray) -> np.ndarray:
+        rel_err = np.where(
+            np.abs(X_raw) > self.error_threshold,
+            self.rel_err_high,
+            self.rel_err_low
+        )
+        scale = rel_err * np.abs(X_raw)
+        noise = np.random.normal(0.0, scale, size=X_raw.shape)
+        X_augmented = X_raw + noise
+        if self.clip_min is not None:
+            X_augmented = np.maximum(X_augmented, self.clip_min)
+        return X_augmented
+
+    def _gaussian_perturb(self, X_raw: np.ndarray, feature_std: np.ndarray) -> np.ndarray:
+        noise = np.random.normal(0.0, self.noise_level, X_raw.shape) * feature_std
+        X_augmented = X_raw + noise
+        if self.clip_min is not None:
+            X_augmented = np.maximum(X_augmented, self.clip_min)
+        return X_augmented
+
+    def fit_transform(
+                      self, 
                       X_train: np.ndarray, 
                       y_train: np.ndarray, 
                       groups_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
-        """标准化并生成增强样本"""
+        """Standardize and generate augmented samples."""
         np.random.seed(self.random_seed)
-        
-        # 1. 计算原始空间的特征标准差（用于生成噪声）
+
+        # 1. Feature std for Gaussian fallback
         feature_std = np.std(X_train, axis=0)
-        
-        # 2. 标准化器（在原始数据上拟合）
+
+        # 2. Fit scaler on raw data
         scaler = StandardScaler()
         scaler.fit(X_train)
-        
-        # 3. 生成增强样本
+
+        # 3. Generate augmented samples
         X_list = [X_train]
         y_list = [y_train]
-        
-        for i in range(self.n_aug):
-            # 在原始空间添加噪声
-            noise = np.random.normal(0, self.noise_level, X_train.shape) * feature_std
-            X_augmented = X_train + noise
+
+        for _ in range(self.n_aug):
+            if self.error_model == "epma":
+                X_augmented = self._epma_perturb(X_train)
+            else:
+                X_augmented = self._gaussian_perturb(X_train, feature_std)
             X_list.append(X_augmented)
-            y_list.append(y_train)  # 目标值不变
-        
-        # 4. 合并并标准化
+            y_list.append(y_train)
+
+        # 4. Merge and scale
         X_all = np.vstack(X_list)
         y_all = np.concatenate(y_list)
         X_scaled = scaler.transform(X_all)
-        
-        # 5. 所有样本权重相等
+
+        # 5. Uniform sample weights
         sample_weights = np.ones(len(y_all), dtype=np.float64)
-        
-        # 6. 保存状态
+
+        # 6. Save state
         state = DataModuleState(
             scaler=scaler,
             feature_std=feature_std,
             extra={
                 'n_aug': self.n_aug,
                 'noise_level': self.noise_level,
+                'error_model': self.error_model,
+                'rel_err_high': self.rel_err_high,
+                'rel_err_low': self.rel_err_low,
+                'error_threshold': self.error_threshold,
+                'clip_min': self.clip_min,
                 'original_size': len(y_train)
             }
         )
-        
+
         return X_scaled, y_all, sample_weights, state
-    
-    def transform(self, 
+
+    def transform(
+                  self,
                   X_val: np.ndarray, 
                   state: DataModuleState
                   ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """变换验证数据（不增强，仅标准化）"""
+        """Transform validation data (no augmentation)."""
         X_scaled = state.scaler.transform(X_val)
         return X_scaled, None
-
 
 # ============================================================
 # 便捷工厂函数

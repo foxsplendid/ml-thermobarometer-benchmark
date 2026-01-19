@@ -85,7 +85,7 @@ def get_experiment_configs():
     核心因果矩阵：M1 × M2 × M3 × 特征集
     - M1: raw / balanced / augmented
     - M2: ert / catboost / stacking
-    - M3: none / residual
+    - M3: none / segmented
     - 特征集: NoLiquid / Liquid
     """
     from src.protocol import ExperimentConfig
@@ -108,14 +108,14 @@ def get_experiment_configs():
         {'data': 'augmented', 'model': 'ert', 'corr': 'none', 'unc': False, 'rand': False},
         # E08: Augmented + CatBoost + None
         {'data': 'augmented', 'model': 'catboost', 'corr': 'none', 'unc': False, 'rand': False},
-        # E09: Raw + CatBoost + Residual
-        {'data': 'raw', 'model': 'catboost', 'corr': 'residual', 'unc': False, 'rand': False},
-        # E10: Balanced + ERT + Residual
-        {'data': 'balanced', 'model': 'ert', 'corr': 'residual', 'unc': False, 'rand': False},
-        # E11: Balanced + CatBoost + Residual (主力配置)
-        {'data': 'balanced', 'model': 'catboost', 'corr': 'residual', 'unc': True, 'rand': True},
-        # E12: Balanced + Stacking + Residual
-        {'data': 'balanced', 'model': 'stacking', 'corr': 'residual', 'unc': True, 'rand': True},
+        # E09: Raw + CatBoost + Segmented
+        {'data': 'raw', 'model': 'catboost', 'corr': 'segmented', 'unc': False, 'rand': False},
+        # E10: Balanced + ERT + Segmented
+        {'data': 'balanced', 'model': 'ert', 'corr': 'segmented', 'unc': False, 'rand': False},
+        # E11: Balanced + CatBoost + Segmented (主力配置)
+        {'data': 'balanced', 'model': 'catboost', 'corr': 'segmented', 'unc': True, 'rand': True},
+        # E12: Balanced + Stacking + Segmented
+        {'data': 'balanced', 'model': 'stacking', 'corr': 'segmented', 'unc': True, 'rand': True},
     ]
 
     # 为每个配置生成NoLiquid和Liquid两个版本
