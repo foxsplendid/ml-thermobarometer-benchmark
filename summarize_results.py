@@ -184,25 +184,16 @@ def main():
     pd.set_option('display.precision', 3)
     
     print(pivot_df_sorted[available_cols].to_string(index=False))
-    
-    # 5. 计算效应表
-    print("\n" + "=" * 70)
-    print("模块效应分析")
-    print("=" * 70)
-    
-    effect_df = compute_effect_table(pivot_df)
-    
-    # 按因子分组显示
-    for factor in ['feature_set', 'model', 'data', 'correction']:
-        subset = effect_df[effect_df['factor'] == factor]
-        if len(subset) > 0:
-            print(f"\n=== {factor.upper()} 效应 ===")
-            for target in ['T', 'P']:
-                t_subset = subset[subset['target'] == target]
-                if len(t_subset) > 0:
-                    print(f"\n目标: {target}")
-                    for _, row in t_subset.iterrows():
-                        print(f"  {row['level']:12s}: RMSE={row['rmse_mean']:6.2f}, R²={row['r2_mean']:.4f} (n={int(row['n_exp'])})")
+
+    # Add parsed fields
+    pivot_df_sorted = pivot_df_sorted.reset_index(drop=True)
+    info_df = pivot_df_sorted['exp_id'].apply(parse_exp_id).apply(pd.Series)
+    pivot_df_sorted = pd.concat([pivot_df_sorted, info_df], axis=1)
+    parse_cols = ['exp_num', 'model', 'data', 'corr', 'feature_set']
+    ordered_cols = ['exp_id'] + [c for c in parse_cols if c in pivot_df_sorted.columns]
+    ordered_cols += [c for c in pivot_df_sorted.columns if c not in ordered_cols]
+    pivot_df_sorted = pivot_df_sorted[ordered_cols]
+
     
     # 6. 最佳配置
     print("\n" + "=" * 70)
@@ -219,19 +210,14 @@ def main():
             unit = '°C' if target == 'T' else 'kbar'
             print(f"\n{target}模型最佳配置: {best['exp_id']}")
             print(f"  RMSE = {best[rmse_col]:.2f} {unit}")
-            print(f"  R²   = {best[r2_col]:.4f}")
-    
-    # 7. 保存效应表
-    effect_path = os.path.join(RESULTS_DIR, 'effect_table.csv')
-    effect_df.to_csv(effect_path, index=False)
-    print(f"\n效应表已保存: {effect_path}")
+            print(f"  R2   = {best[r2_col]:.4f}")
     
     # 8. 保存汇总表
     summary_path = os.path.join(RESULTS_DIR, 'experiment_summary.csv')
     pivot_df_sorted.to_csv(summary_path, index=False)
     print(f"汇总表已保存: {summary_path}")
     
-    return pivot_df_sorted, effect_df
+    return pivot_df_sorted
 
 if __name__ == '__main__':
     main()

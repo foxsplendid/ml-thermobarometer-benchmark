@@ -2,207 +2,175 @@
 """
 Chapter 3 Benchmark Protocol - M4 不确定性模块实现
 Uncertainty Modules: MCUncertaintyEstimator
-
 核心功能：
 1. 蒙特卡洛输入扰动
 2. 预测分布计算（均值、标准差、置信区间）
 3. 校准指标计算（PICP、区间宽度、误差-不确定性相关性）
 """
-
 import numpy as np
 from typing import Any, Dict, Optional
-
 from .interfaces import UncertaintyModule
-
 
 # ============================================================
 # 蒙特卡洛不确定性估计器
 # ============================================================
-
 class MCUncertaintyEstimator(UncertaintyModule):
     """
-    蒙特卡洛输入扰动不确定性估计器
-    
-    策略：
-    1. 对每个验证样本的输入特征添加高斯噪声（模拟分析误差）
-    2. 重复执行 N 次预测
-    3. 计算预测分布的统计量（均值、标准差、分位数）
-    
-    应用场景：
-    - 评估预测对输入不确定性的敏感性
-    - 生成预测置信区间
-    - 校准模型的不确定性估计
+    Monte Carlo input perturbation for uncertainty estimation.
+
+    - EPMA mode: relative error (3% > 1 wt%, 8% <= 1 wt%).
+    - Gaussian mode: noise_level * feature_std fallback.
     """
-    
+
     def __init__(self,
-                 n_mc: int = 50,
+                 n_mc: int = 1000,
                  noise_level: float = 0.02,
-                 percentiles: tuple = (2.5, 50, 97.5),
+                 error_model: str = "epma",
+                 rel_err_high: float = 0.03,
+                 rel_err_low: float = 0.08,
+                 error_threshold: float = 1.0,
+                 clip_min: Optional[float] = 0.0,
+                 percentiles: tuple = (16, 50, 84),
                  random_seed: int = 42):
-        """
-        Parameters
-        ----------
-        n_mc : int
-            蒙特卡洛迭代次数
-        noise_level : float
-            噪声水平（相对于特征标准差的比例）
-        percentiles : tuple
-            要计算的分位数
-        random_seed : int
-            随机种子
-        """
         self.n_mc = n_mc
         self.noise_level = noise_level
+        self.error_model = error_model.lower().strip() if isinstance(error_model, str) else "epma"
+        self.rel_err_high = rel_err_high
+        self.rel_err_low = rel_err_low
+        self.error_threshold = error_threshold
+        self.clip_min = clip_min
         self.percentiles = percentiles
         self.random_seed = random_seed
-    
+
     def predict_distribution(self,
-                             pipeline: Any,  # Pipeline 对象
+                             pipeline: Any,
                              X: np.ndarray,
                              mc_params: Optional[Dict[str, Any]] = None
                              ) -> Dict[str, np.ndarray]:
-        """
-        执行蒙特卡洛不确定性估计
-        
-        Parameters
-        ----------
-        pipeline : Pipeline
-            完整的预测管道，必须实现 predict_raw(X) 方法
-            - predict_raw 接受原始（未标准化）特征，内部处理标准化和校正
-        X : np.ndarray
-            原始特征（未标准化）
-        mc_params : dict, optional
-            MC 参数覆盖
-            
-        Returns
-        -------
-        dist : dict
-            预测分布统计量
-        """
         np.random.seed(self.random_seed)
-        
-        # 参数覆盖
+
         n_mc = mc_params.get('n_mc', self.n_mc) if mc_params else self.n_mc
         noise_level = mc_params.get('noise_level', self.noise_level) if mc_params else self.noise_level
-        
+        error_model = mc_params.get('error_model', self.error_model) if mc_params else self.error_model
+        rel_err_high = mc_params.get('rel_err_high', self.rel_err_high) if mc_params else self.rel_err_high
+        rel_err_low = mc_params.get('rel_err_low', self.rel_err_low) if mc_params else self.rel_err_low
+        error_threshold = mc_params.get('error_threshold', self.error_threshold) if mc_params else self.error_threshold
+        clip_min = mc_params.get('clip_min', self.clip_min) if mc_params else self.clip_min
+        percentiles = mc_params.get('percentiles', self.percentiles) if mc_params else self.percentiles
+
+        error_model = error_model.lower().strip() if isinstance(error_model, str) else "epma"
+
         n_samples = X.shape[0]
         predictions = np.zeros((n_mc, n_samples))
-        
-        # 计算特征标准差（用于生成相对噪声）
-        feature_std = np.std(X, axis=0)
-        feature_std = np.where(feature_std < 1e-10, 1.0, feature_std)  # 避免除零
-        
-        for i in range(n_mc):
-            # 添加高斯噪声
-            noise = np.random.normal(0, noise_level, X.shape) * feature_std
-            X_perturbed = X + noise
-            
-            # 通过 pipeline 预测
-            y_pred = pipeline.predict_raw(X_perturbed)
-            predictions[i] = y_pred
-        
-        # 计算统计量
+
+        if error_model == "epma":
+            rel_err = np.where(
+                np.abs(X) > error_threshold,
+                rel_err_high,
+                rel_err_low
+            )
+            scale = rel_err * np.abs(X)
+            for i in range(n_mc):
+                noise = np.random.normal(0.0, scale, size=X.shape)
+                X_perturbed = X + noise
+                if clip_min is not None:
+                    X_perturbed = np.maximum(X_perturbed, clip_min)
+                predictions[i] = pipeline.predict_raw(X_perturbed)
+        else:
+            feature_std = np.std(X, axis=0)
+            feature_std = np.where(feature_std < 1e-10, 1.0, feature_std)
+            scale = noise_level * feature_std
+            for i in range(n_mc):
+                noise = np.random.normal(0.0, scale, size=X.shape)
+                X_perturbed = X + noise
+                if clip_min is not None:
+                    X_perturbed = np.maximum(X_perturbed, clip_min)
+                predictions[i] = pipeline.predict_raw(X_perturbed)
+
+        percentiles = tuple(percentiles)
+        pct_values = np.percentile(predictions, percentiles, axis=0)
+        pct_map = {p: pct_values[i] for i, p in enumerate(percentiles)}
+
+        p16 = pct_map.get(16, np.percentile(predictions, 16, axis=0))
+        p84 = pct_map.get(84, np.percentile(predictions, 84, axis=0))
+        median = pct_map.get(50, np.percentile(predictions, 50, axis=0))
+        p5 = pct_map.get(5, np.percentile(predictions, 5, axis=0))
+        p95 = pct_map.get(95, np.percentile(predictions, 95, axis=0))
+
         return {
             'samples': predictions,
             'mean': np.mean(predictions, axis=0),
             'std': np.std(predictions, axis=0),
-            'ci_lower': np.percentile(predictions, 2.5, axis=0),
-            'ci_upper': np.percentile(predictions, 97.5, axis=0),
-            'median': np.percentile(predictions, 50, axis=0),
-            'p5': np.percentile(predictions, 5, axis=0),
-            'p95': np.percentile(predictions, 95, axis=0),
+            'ci_lower': p16,
+            'ci_upper': p84,
+            'median': median,
+            'p16': p16,
+            'p84': p84,
+            'p5': p5,
+            'p95': p95,
         }
-    
+
     def compute_calibration_metrics(self,
                                     y_true: np.ndarray,
                                     dist: Dict[str, np.ndarray]
                                     ) -> Dict[str, float]:
-        """
-        计算校准指标
-        
-        Parameters
-        ----------
-        y_true : np.ndarray
-            真实值
-        dist : dict
-            由 predict_distribution 返回的分布字典
-            
-        Returns
-        -------
-        metrics : dict
-            校准指标：
-            - picp_95: 95% 预测区间覆盖概率
-            - picp_90: 90% 预测区间覆盖概率
-            - mean_interval_width: 平均区间宽度
-            - median_interval_width: 中位区间宽度
-            - error_uncertainty_corr: |error| 与 width 的相关性
-            - sharpness: 区间宽度的标准差（越小越好）
-        """
-        # 95% 预测区间覆盖概率
-        in_95_interval = (y_true >= dist['ci_lower']) & (y_true <= dist['ci_upper'])
-        picp_95 = np.mean(in_95_interval)
-        
-        # 90% 预测区间覆盖概率
-        in_90_interval = (y_true >= dist['p5']) & (y_true <= dist['p95'])
+        lower = dist.get('p16', dist.get('ci_lower'))
+        upper = dist.get('p84', dist.get('ci_upper'))
+        if lower is None or upper is None:
+            lower = np.percentile(dist['samples'], 16, axis=0)
+            upper = np.percentile(dist['samples'], 84, axis=0)
+
+        in_68_interval = (y_true >= lower) & (y_true <= upper)
+        picp_68 = np.mean(in_68_interval)
+
+        lower_90 = dist.get('p5')
+        upper_90 = dist.get('p95')
+        if lower_90 is None or upper_90 is None:
+            lower_90 = np.percentile(dist['samples'], 5, axis=0)
+            upper_90 = np.percentile(dist['samples'], 95, axis=0)
+        in_90_interval = (y_true >= lower_90) & (y_true <= upper_90)
         picp_90 = np.mean(in_90_interval)
-        
-        # 区间宽度
-        widths_95 = dist['ci_upper'] - dist['ci_lower']
-        mean_width = np.mean(widths_95)
-        median_width = np.median(widths_95)
-        
-        # 误差与不确定性的相关性
-        # 理想情况：误差大的地方，不确定性也应该大
-        abs_errors = np.abs(y_true - dist['mean'])
-        if np.std(abs_errors) > 1e-10 and np.std(widths_95) > 1e-10:
-            corr = np.corrcoef(abs_errors, widths_95)[0, 1]
+
+        widths = upper - lower
+        mean_width = np.mean(widths)
+        median_width = np.median(widths)
+
+        center = dist.get('median', dist.get('mean'))
+        abs_errors = np.abs(y_true - center)
+        if np.std(abs_errors) > 1e-10 and np.std(widths) > 1e-10:
+            corr = np.corrcoef(abs_errors, widths)[0, 1]
         else:
             corr = np.nan
-        
-        # Sharpness：区间宽度的变异性
-        sharpness = np.std(widths_95)
-        
+
+        sharpness = np.std(widths)
+
         return {
-            'picp_95': picp_95,
+            'picp_68': picp_68,
             'picp_90': picp_90,
             'mean_interval_width': mean_width,
             'median_interval_width': median_width,
             'error_uncertainty_corr': corr,
             'sharpness': sharpness,
         }
-    
+
     def compute_reliability_diagram_data(self,
                                          y_true: np.ndarray,
                                          dist: Dict[str, np.ndarray],
                                          n_bins: int = 10
                                          ) -> Dict[str, np.ndarray]:
-        """
-        计算可靠性图数据（用于校准可视化）
-        
-        Returns
-        -------
-        data : dict
-            - expected_coverage: 期望覆盖率（分位数级别）
-            - observed_coverage: 观测覆盖率
-        """
         quantiles = np.linspace(5, 95, n_bins)
         observed_coverages = []
-        
+
         for q in quantiles:
             lower = np.percentile(dist['samples'], (100 - q) / 2, axis=0)
             upper = np.percentile(dist['samples'], 100 - (100 - q) / 2, axis=0)
             in_interval = (y_true >= lower) & (y_true <= upper)
             observed_coverages.append(np.mean(in_interval))
-        
+
         return {
             'expected_coverage': quantiles / 100,
             'observed_coverage': np.array(observed_coverages),
         }
-
-
-# ============================================================
-# MC-CV 重复切分（可选扩展）
-# ============================================================
 
 class MCCVUncertaintyEstimator(UncertaintyModule):
     """
@@ -234,11 +202,9 @@ class MCCVUncertaintyEstimator(UncertaintyModule):
         # 复用 MCUncertaintyEstimator 的实现
         return MCUncertaintyEstimator().compute_calibration_metrics(y_true, dist)
 
-
 # ============================================================
 # 便捷工厂函数
 # ============================================================
-
 def get_uncertainty_module(name: str, **kwargs) -> UncertaintyModule:
     """
     不确定性模块工厂函数
@@ -266,11 +232,9 @@ def get_uncertainty_module(name: str, **kwargs) -> UncertaintyModule:
     
     return modules[name_lower](**kwargs)
 
-
 # ============================================================
 # 模块测试
 # ============================================================
-
 if __name__ == "__main__":
     print("=== 不确定性模块测试 ===\n")
     
