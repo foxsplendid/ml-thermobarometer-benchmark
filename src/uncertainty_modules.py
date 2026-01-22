@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Chapter 3 Benchmark Protocol - M4 不确定性模块实现
-Uncertainty Modules: MCUncertaintyEstimator
-核心功能：
-1. 蒙特卡洛输入扰动
-2. 预测分布计算（均值、标准差、置信区间）
-3. 校准指标计算（PICP、区间宽度、误差-不确定性相关性）
+M4 不确定性模块 - MCUncertaintyEstimator
+
+功能：蒙特卡洛输入扰动、预测分布、校准指标
 """
 import numpy as np
 from typing import Any, Dict, Optional
@@ -16,10 +13,8 @@ from .interfaces import UncertaintyModule
 # ============================================================
 class MCUncertaintyEstimator(UncertaintyModule):
     """
-    Monte Carlo input perturbation for uncertainty estimation.
-
-    - EPMA mode: relative error (3% > 1 wt%, 8% <= 1 wt%).
-    - Gaussian mode: noise_level * feature_std fallback.
+    MC输入扰动不确定性估计
+    EPMA模式：>1wt%使用3%误差，<=1wt%使用8%误差
     """
 
     def __init__(self,
@@ -47,7 +42,8 @@ class MCUncertaintyEstimator(UncertaintyModule):
                              X: np.ndarray,
                              mc_params: Optional[Dict[str, Any]] = None
                              ) -> Dict[str, np.ndarray]:
-        np.random.seed(self.random_seed)
+        # 使用隔离的 RandomState，避免污染全局随机状态
+        rng = np.random.RandomState(self.random_seed)
 
         n_mc = mc_params.get('n_mc', self.n_mc) if mc_params else self.n_mc
         noise_level = mc_params.get('noise_level', self.noise_level) if mc_params else self.noise_level
@@ -71,7 +67,7 @@ class MCUncertaintyEstimator(UncertaintyModule):
             )
             scale = rel_err * np.abs(X)
             for i in range(n_mc):
-                noise = np.random.normal(0.0, scale, size=X.shape)
+                noise = rng.normal(0.0, scale, size=X.shape)
                 X_perturbed = X + noise
                 if clip_min is not None:
                     X_perturbed = np.maximum(X_perturbed, clip_min)
@@ -81,7 +77,7 @@ class MCUncertaintyEstimator(UncertaintyModule):
             feature_std = np.where(feature_std < 1e-10, 1.0, feature_std)
             scale = noise_level * feature_std
             for i in range(n_mc):
-                noise = np.random.normal(0.0, scale, size=X.shape)
+                noise = rng.normal(0.0, scale, size=X.shape)
                 X_perturbed = X + noise
                 if clip_min is not None:
                     X_perturbed = np.maximum(X_perturbed, clip_min)
@@ -172,35 +168,6 @@ class MCUncertaintyEstimator(UncertaintyModule):
             'observed_coverage': np.array(observed_coverages),
         }
 
-class MCCVUncertaintyEstimator(UncertaintyModule):
-    """
-    MC-CV 不确定性估计器（可选扩展）
-    
-    通过多次随机重新划分训练/验证集来评估模型不确定性
-    这种方法评估的是模型本身的稳定性，而非输入不确定性
-    """
-    
-    def __init__(self, n_repeats: int = 10, random_seed: int = 42):
-        self.n_repeats = n_repeats
-        self.random_seed = random_seed
-    
-    def predict_distribution(self,
-                             pipeline: Any,
-                             X: np.ndarray,
-                             mc_params: Optional[Dict[str, Any]] = None
-                             ) -> Dict[str, np.ndarray]:
-        """需要完整的 CV 重新训练，通常在 Protocol 层面实现"""
-        raise NotImplementedError(
-            "MC-CV 需要在 Protocol 层面实现，因为需要重新训练模型"
-        )
-    
-    def compute_calibration_metrics(self,
-                                    y_true: np.ndarray,
-                                    dist: Dict[str, np.ndarray]
-                                    ) -> Dict[str, float]:
-        """与 MCUncertaintyEstimator 相同"""
-        # 复用 MCUncertaintyEstimator 的实现
-        return MCUncertaintyEstimator().compute_calibration_metrics(y_true, dist)
 
 # ============================================================
 # 便捷工厂函数
@@ -212,7 +179,7 @@ def get_uncertainty_module(name: str, **kwargs) -> UncertaintyModule:
     Parameters
     ----------
     name : str
-        模块名称: 'mc' | 'mccv'
+        模块名称: 'mc'
     **kwargs
         模块参数
         
@@ -223,7 +190,6 @@ def get_uncertainty_module(name: str, **kwargs) -> UncertaintyModule:
     """
     modules = {
         'mc': MCUncertaintyEstimator,
-        'mccv': MCCVUncertaintyEstimator,
     }
     
     name_lower = name.lower().strip()

@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Chapter 3 Benchmark Protocol - 统一接口定义
-Interfaces: DataModule, ModelModule, CorrectionModule, UncertaintyModule
-
-所有模块必须实现这些抽象接口，确保可插拔与防泄露
+统一接口定义 - DataModule, ModelModule, CorrectionModule, UncertaintyModule
 """
 
 from abc import ABC, abstractmethod
@@ -13,17 +10,12 @@ import numpy as np
 
 
 # ============================================================
-# 数据模块状态（用于在验证折应用相同变换）
+# 数据模块状态
 # ============================================================
 
 @dataclass
 class DataModuleState:
-    """
-    数据模块拟合状态
-    
-    存储在训练折上拟合的参数，用于在验证折上应用相同变换
-    禁止在验证折上重新拟合！
-    """
+    """数据模块拟合状态，用于验证折应用相同变换"""
     scaler: Any = None                     # StandardScaler 实例
     bin_edges: Optional[np.ndarray] = None # 分箱边界
     feature_std: Optional[np.ndarray] = None # 原始特征标准差（用于MC增强）
@@ -38,14 +30,8 @@ class DataModule(ABC):
     """
     M1 数据模块抽象基类
     
-    职责：
-    - 数据标准化
-    - 分布处理（分箱重加权、增强等）
-    - 输出样本权重
-    
-    防泄露约束：
-    - fit_transform() 只在训练折调用
-    - transform() 只在验证折调用，禁止任何拟合操作
+    职责：数据标准化、分布处理、输出样本权重
+    约束：fit_transform() 仅训练折调用，transform() 仅验证折调用
     """
     
     @abstractmethod

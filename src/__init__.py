@@ -61,12 +61,11 @@ from .uncertainty_modules import (
 # ============================================================
 from .protocol import (
     Pipeline,
-    GroupCVProtocol,
+    StratifiedCVProtocol,
     RandomSplitProtocol,
     ExperimentConfig,
     ExperimentMatrix,
     compute_all_metrics,
-    summarize_folds,
 )
 
 # ============================================================
@@ -79,6 +78,7 @@ from .metrics import (
     compute_metrics,
     compute_slope_intercept,
     compute_bias_stats,
+    summarize_folds,  # 直接从 metrics 导出，避免间接导出链
 )
 
 # ============================================================

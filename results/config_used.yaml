@@ -176,9 +176,6 @@ feature_sets:
 - Liquid
 n_splits: 10
 random_seed: 42
-stability_repeats: 1000
-stability_seed_start: 0
-stability_test_size: 0.3
 test_split:
   n_pt_bins: 349
   p_edges:
@@ -625,5 +622,4 @@ test_split:
   - 45
   - 629
   - 163
-  test_ref_split_ratio: null
   test_size: 349

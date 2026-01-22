@@ -4,7 +4,8 @@ Chapter 3 Benchmark Protocol - 主入口
 Main Entry Point: 一键运行实验矩阵
 
 使用方法：
-    python main.py
+    python main.py          # 运行完整实验矩阵
+    python main.py --test   # 快速测试（2折，4个实验）
 
 输出：
     results/
@@ -12,8 +13,12 @@ Main Entry Point: 一键运行实验矩阵
     ├── effect_table.csv
     ├── config_used.yaml
     ├── {exp_id}_{T/P}_fold_metrics.csv
-    ├── {exp_id}_{T/P}_predictions.parquet
-    └── figures/
+    └── {exp_id}_{T/P}_predictions.parquet
+
+注意：
+    - 绘图功能请使用 tools/plot_offline_figures.py
+    - 稳定性测试请使用 tools/run_stability_mc.py
+    - MC不确定性测试请使用 tools/run_stability_mc.py
 """
 
 import os
@@ -62,12 +67,6 @@ CONFIG = {
     # CV 配置
     'n_splits': 10,
     'random_seed': 42,
-    'test_split_max_ref_ratio': 0.05,
-    'test_split_max_tries': 200,
-    'stability_repeats': 1000,
-    'stability_test_size': 0.3,
-    'stability_seed_start': 0,
-    'run_stability': False,
 
     # 输出配置
     'output_dir': os.path.join(PROJECT_ROOT, 'results'),
@@ -90,32 +89,32 @@ def get_experiment_configs():
     """
     from src.protocol import ExperimentConfig
 
-    # 定义12个基础配置
+    # 定义12个基础配置（所有实验均不启用不确定性和随机划分，这些功能在tools中运行）
     base_configs = [
         # E01: Raw + ERT + None
-        {'data': 'raw', 'model': 'ert', 'corr': 'none', 'unc': False, 'rand': False},
+        {'data': 'raw', 'model': 'ert', 'corr': 'none'},
         # E02: Raw + CatBoost + None
-        {'data': 'raw', 'model': 'catboost', 'corr': 'none', 'unc': False, 'rand': True},
+        {'data': 'raw', 'model': 'catboost', 'corr': 'none'},
         # E03: Raw + Stacking + None
-        {'data': 'raw', 'model': 'stacking', 'corr': 'none', 'unc': False, 'rand': True},
+        {'data': 'raw', 'model': 'stacking', 'corr': 'none'},
         # E04: Balanced + ERT + None
-        {'data': 'balanced', 'model': 'ert', 'corr': 'none', 'unc': False, 'rand': False},
+        {'data': 'balanced', 'model': 'ert', 'corr': 'none'},
         # E05: Balanced + CatBoost + None
-        {'data': 'balanced', 'model': 'catboost', 'corr': 'none', 'unc': False, 'rand': False},
+        {'data': 'balanced', 'model': 'catboost', 'corr': 'none'},
         # E06: Balanced + Stacking + None
-        {'data': 'balanced', 'model': 'stacking', 'corr': 'none', 'unc': False, 'rand': False},
+        {'data': 'balanced', 'model': 'stacking', 'corr': 'none'},
         # E07: Augmented + ERT + None
-        {'data': 'augmented', 'model': 'ert', 'corr': 'none', 'unc': False, 'rand': False},
+        {'data': 'augmented', 'model': 'ert', 'corr': 'none'},
         # E08: Augmented + CatBoost + None
-        {'data': 'augmented', 'model': 'catboost', 'corr': 'none', 'unc': False, 'rand': False},
+        {'data': 'augmented', 'model': 'catboost', 'corr': 'none'},
         # E09: Raw + CatBoost + Segmented
-        {'data': 'raw', 'model': 'catboost', 'corr': 'segmented', 'unc': False, 'rand': False},
+        {'data': 'raw', 'model': 'catboost', 'corr': 'segmented'},
         # E10: Balanced + ERT + Segmented
-        {'data': 'balanced', 'model': 'ert', 'corr': 'segmented', 'unc': False, 'rand': False},
+        {'data': 'balanced', 'model': 'ert', 'corr': 'segmented'},
         # E11: Balanced + CatBoost + Segmented (主力配置)
-        {'data': 'balanced', 'model': 'catboost', 'corr': 'segmented', 'unc': True, 'rand': True},
+        {'data': 'balanced', 'model': 'catboost', 'corr': 'segmented'},
         # E12: Balanced + Stacking + Segmented
-        {'data': 'balanced', 'model': 'stacking', 'corr': 'segmented', 'unc': True, 'rand': True},
+        {'data': 'balanced', 'model': 'stacking', 'corr': 'segmented'},
     ]
 
     # 为每个配置生成NoLiquid和Liquid两个版本
@@ -131,8 +130,8 @@ def get_experiment_configs():
                 model_module_name=base['model'],
                 corr_module_name=base['corr'],
                 feature_set=fset,
-                run_uncertainty=base['unc'],
-                run_random_split=base['rand'],
+                run_uncertainty=False,  # 不确定性测试在tools中运行
+                run_random_split=False,  # 随机划分测试在tools中运行
             ))
 
     return final_configs  # 24个实验
@@ -222,12 +221,10 @@ def prepare_splits(X, y_T, y_P, groups, config):
     print(f"  测试集大小: {len(test_idx)} (从{len(np.unique(tp_bins))}个非空P-T bins采样)")
     print(f"  P-T bins覆盖: {len(unique_bins)}/{len(np.unique(tp_bins))}")
     print(f"  每bin样本数: min={bin_counts.min()}, max={bin_counts.max()}, mean={bin_counts.mean():.2f}")
-    print(f"  注意: 不使用Ref分组约束，优先保证P-T分布平衡")
 
     split_info = {
         'test_indices': test_idx.tolist(),
         'test_size': int(len(test_idx)),
-        'test_ref_split_ratio': None,  # 不再计算
         'p_edges': bins.p_edges.tolist(),
         't_edges': bins.t_edges.tolist(),
         'n_pt_bins': len(unique_bins),
@@ -236,15 +233,7 @@ def prepare_splits(X, y_T, y_P, groups, config):
     return {
         'train_idx': train_idx,
         'test_idx': test_idx,
-        'X_train': X[train_idx],
-        'y_T_train': y_T[train_idx],
-        'y_P_train': y_P[train_idx],
-        'groups_train': groups[train_idx],
         'tp_bins_train': tp_bins[train_idx],
-        'X_test': X[test_idx],
-        'y_T_test': y_T[test_idx],
-        'y_P_test': y_P[test_idx],
-        'groups_test': groups[test_idx],
         'split_info': split_info,
     }
 
@@ -295,7 +284,6 @@ def main():
         y_P_train = y_P[train_idx]
         y_P_test = y_P[test_idx]
         groups_train = groups[train_idx]
-        groups_test = groups[test_idx]
 
         # 筛选该特征集的实验配置
         feature_configs = [c for c in configs if c.feature_set == feature_set]
@@ -317,42 +305,26 @@ def main():
             configs=feature_configs,
             n_splits=CONFIG['n_splits'],
             stratify_labels=tp_bins_train,
+            X_test=X_test,
+            y_T_test=y_T_test,
+            y_P_test=y_P_test,
             random_seed=CONFIG['random_seed'],
             verbose=True,
         )
 
         all_results.append(summary_df)
 
-        # 稳定性测试（如果启用）
-        if CONFIG.get('run_stability', False):
-            matrix.run_stability_repeats(
-                configs=feature_configs,
-                X_test=X_test,
-                y_T_test=y_T_test,
-                y_P_test=y_P_test,
-                groups_test=groups_test,
-                stratify_labels=tp_bins_train,
-                n_splits=CONFIG['n_splits'],
-                test_size=CONFIG['stability_test_size'],
-                n_repeats=CONFIG['stability_repeats'],
-                random_seed=CONFIG['stability_seed_start'],
-                verbose=True,
-            )
-
     # 4. 合并所有结果
     summary_df = pd.concat(all_results, ignore_index=True)
 
     # 5. 计算效应表
-    effect_df = matrix.compute_effect_table(summary_df)
+    matrix.compute_effect_table(summary_df)
 
     # 6. 保存配置
     matrix.save_config(configs, extra_info={
         'n_splits': CONFIG['n_splits'],
         'random_seed': CONFIG['random_seed'],
         'test_split': split_info,
-        'stability_repeats': CONFIG['stability_repeats'],
-        'stability_test_size': CONFIG['stability_test_size'],
-        'stability_seed_start': CONFIG['stability_seed_start'],
         'feature_sets': list(CONFIG['feature_sets'].keys()),
     })
 
@@ -380,7 +352,6 @@ def run_quick_test():
     # 修改配置
     test_config = CONFIG.copy()
     test_config['output_dir'] = os.path.join(PROJECT_ROOT, 'results_test')
-    test_config['stability_repeats'] = 10
 
     # 1. 加载数据（使用Liquid特征集进行分割）
     X_liquid, y_T, y_P, groups = load_data(test_config, feature_set='Liquid')
@@ -413,8 +384,11 @@ def run_quick_test():
 
         # 使用相同的train/test划分
         X_train = X[train_idx]
+        X_test = X[test_idx]
         y_T_train = y_T[train_idx]
+        y_T_test = y_T[test_idx]
         y_P_train = y_P[train_idx]
+        y_P_test = y_P[test_idx]
         groups_train = groups[train_idx]
 
         # 筛选该特征集的实验配置
@@ -437,6 +411,9 @@ def run_quick_test():
             configs=feature_configs,
             n_splits=2,  # 快速测试使用2折
             stratify_labels=tp_bins_train,
+            X_test=X_test,
+            y_T_test=y_T_test,
+            y_P_test=y_P_test,
             random_seed=test_config['random_seed'],
             verbose=True,
         )

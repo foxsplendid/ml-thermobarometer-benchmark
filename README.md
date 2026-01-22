@@ -9,8 +9,8 @@
 - ✅ **双特征集对比**：NoLiquid(9特征) vs Liquid(18特征)
 - ✅ **P-T分层采样**：基于P-T网格的分层交叉验证，优先保证P-T分布平衡
 - ✅ **T/P 独立建模**：温度与压力采用完全独立的建模链路
-- ✅ **不确定性量化**：蒙特卡洛输入扰动 + 校准指标
 - ✅ **Strict OOF Stacking**：严格 OOF 元特征生成，无数据泄露
+- ✅ **工具分离**：主实验与绘图/稳定性测试/不确定性量化分离，按需运行
 
 ---
 
@@ -36,15 +36,77 @@ ml-thermobarometer-benchmark/
 │   ├── metrics.py               # 指标计算
 │   └── viz.py                   # 可视化
 │
+├── tools/                       # 工具脚本（独立于main.py运行）
+│   ├── run_stability_mc.py      # 稳定性测试 + MC不确定性量化
+│   └── plot_offline_figures.py  # 离线绘图 + 特征重要性
+│
 ├── results/                     # 实验输出目录
-│   ├── experiment_summary.csv
-│   ├── metrics_summary.csv
-│   └── figures/
+│   ├── metrics_summary.csv      # 汇总指标（mean ± CI）
+│   ├── effect_table.csv         # 模块效应分析表
+│   ├── models/                  # 保存的模型文件（.joblib）
+│   └── figures/                 # 可视化图表
 │
 ├── reference_files/             # 参考文件
 │
 └── old/                         # 旧版代码（已归档）
 ```
+
+---
+
+## 架构设计
+
+### 整体工作流
+
+```
+main.py (主入口，仅运行实验)
+    │
+    ├── CONFIG 初始化
+    │   └── 数据路径、特征集、CV参数、输出目录
+    │
+    ├── prepare_splits()
+    │   └── P-T网格采样 → 固定测试集（用于工具脚本）
+    │
+    └── ExperimentMatrix.run_experiments()
+        └── 24个实验 = 12基础配置 × 2特征集
+            │
+            └── StratifiedCVProtocol (10折CV)
+                └── 每折: DataModule → ModelModule → CorrectionModule → 评估
+                └── 保存模型到 results/models/*.joblib
+
+tools/ (独立工具，按需运行)
+    ├── plot_offline_figures.py  → 离线绘图 + 特征重要性
+    └── run_stability_mc.py      → 稳定性测试 + MC不确定性
+```
+
+### 模块依赖关系
+
+| 模块 | 依赖 | 说明 |
+|------|------|------|
+| `interfaces.py` | - | 抽象基类，无外部依赖 |
+| `data_modules.py` | interfaces | M1 数据预处理实现 |
+| `model_modules.py` | interfaces | M2 模型算法实现 |
+| `correction_modules.py` | interfaces | M3 校正策略实现 |
+| `uncertainty_modules.py` | interfaces | M4 不确定性量化 |
+| `protocol.py` | 上述所有 | Pipeline组装与CV执行 |
+| `metrics.py` | - | 纯函数指标计算 |
+| `splitters.py` | - | P-T网格划分工具 |
+| `viz.py` | - | 可视化绑定工具脚本使用 |
+
+### 每折执行流程
+
+1. `DataModule.fit_transform()` - 训练折内拟合标准化器/权重
+2. `ModelModule.fit()` - 训练模型
+3. `ModelModule.predict()` - 生成OOF预测
+4. `CorrectionModule.fit()` - 在全训练集OOF上拟合校正器
+5. 指标计算 (RMSE/MAE/R²/Slope等)
+6. 模型保存至 `results/models/` (支持离线绘图/特征重要性)
+
+### 工具脚本说明
+
+| 工具 | 功能 | 典型用法 |
+|------|------|----------|
+| `plot_offline_figures.py` | 离线绘图、特征重要性 | `python tools/plot_offline_figures.py --exp-id E07_ert_augmented_none_liq` |
+| `run_stability_mc.py` | 稳定性测试、MC不确定性 | `python tools/run_stability_mc.py --model-module ert --n-repeats 100` |
 
 ---
 
@@ -63,7 +125,7 @@ from src import (
     RawDataModule, BalancedDataModule, AugmentedDataModule,
     ExtraTreesModel, CatBoostModel, StrictOOFStacking,
     NoCorrection, ResidualRegressionCorrector, SegmentedLinearCorrector,
-    Pipeline, GroupCVProtocol
+    Pipeline, StratifiedCVProtocol
 )
 print('OK')
 ```
@@ -122,35 +184,148 @@ CPX氧化物（9个）+ 共存熔体（LIQ）氧化物（9个）：
 
 ### M1 数据模块 (DataModule)
 
-| 模块 | 说明 |
-|------|------|
-| `RawDataModule` | 仅标准化 |
-| `BalancedDataModule` | 分箱重加权（逆频率权重） |
-| `AugmentedDataModule` | EPMA 误差模型增强（>1 wt% 3%，<=1 wt% 8%，默认 n_perturbations_train=15） |
+| 模块 | 说明 | 设计要点 |
+|------|------|----------|
+| `RawDataModule` | 仅标准化 | 基线对照，权重=1 |
+| `BalancedDataModule` | 分箱重加权 | 10 bins, quantile策略，逆频率权重 |
+| `AugmentedDataModule` | EPMA 误差模型增强 | >1 wt% 3%误差, ≤1 wt% 8%误差，n=15 |
+
+**设计亮点**：
+- `fit_transform()` 返回 `DataModuleState` 封装拟合状态，实现训练/验证解耦
+- 增强操作仅在训练折内执行，防止数据泄露
+- EPMA 误差模型与地球化学电子探针分析实践对齐
 
 ### M2 模型模块 (ModelModule)
 
-| 模块 | 说明 |
-|------|------|
-| `ExtraTreesModel` | 基线模型（高方差低偏差） |
-| `CatBoostModel` | 强单模型（Boosting 代表） |
-| `StrictOOFStacking` | 严格 OOF 堆叠（ERT+CatBoost+RF→Ridge） |
+| 模块 | 说明 | 核心特点 |
+|------|------|----------|
+| `ExtraTreesModel` | 基线模型（高方差低偏差） | Bagging 集成，特征随机化 |
+| `CatBoostModel` | 强单模型（Boosting 代表） | 梯度提升，内置正则化 |
+| `StrictOOFStacking` | 严格 OOF 堆叠集成 | ERT+CatBoost+RF → Ridge |
+
+#### 模型超参数配置
+
+所有超参数采用**固定配置**，与已发表文献保持一致，不进行超参数调优。
+
+##### ExtraTrees (ERT)
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `n_estimators` | 200 | 树的数量，Jorgenson et al. (2022) 推荐值 |
+| `max_depth` | 15 | 最大深度，Jorgenson et al. (2022) 推荐值 |
+| `min_samples_split` | 5 | 分裂最小样本数，使用 sklearn 默认 |
+| `max_features` | - | 使用 sklearn 默认 (sqrt) |
+| `random_state` | 42 | 随机种子，确保可复现 |
+
+##### CatBoost
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `iterations` | 1000 | 迭代次数 |
+| `depth` | 6 | 树深度 |
+| `learning_rate` | 0.03 | 学习率 |
+| `loss_function` | 'RMSE' | 损失函数 |
+| `random_seed` | 42 | 随机种子 |
+
+##### RandomForest (RF) - Stacking 基模型
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `n_estimators` | 200 | 与 ERT 一致 |
+| `max_depth` | 15 | 与 ERT 一致 |
+| `min_samples_split` | 5 | 与 ERT 一致 |
+| `random_state` | 42 | 随机种子 |
+
+##### Stacking 架构
+
+| 组件 | 配置 | 说明 |
+|------|------|------|
+| **基模型** | ERT + CatBoost + RF | 3 个基模型，参数与单模型实验一致 |
+| **元模型** | Ridge(alpha=1.0) | 线性元模型，防止过拟合 |
+| **内层 CV** | 5 折 StratifiedKFold | 生成 OOF 元特征 |
+| **元特征标准化** | StandardScaler | 标准化后输入元模型 |
+
+> **设计说明**：Stacking 基模型参数与单模型实验**完全一致**，确保公平对比。
+
+**设计亮点**：
+- `_get_default_n_jobs()` 平台自适应（Windows: 1, Linux/Mac: -1）
+- `_detect_catboost_gpu()` 自动检测GPU可用性
+- Stacking内层使用独立StratifiedKFold生成OOF元特征，无数据泄露
 
 ### M3 校正模块 (CorrectionModule)
 
-| 模块 | 说明 |
-|------|------|
-| `NoCorrection` | 无校正 |
-| `ResidualRegressionCorrector` | 残差回归校正（基于OOF预测，可选） |
-| `SegmentedLinearCorrector` | 分段线性校正 + 训练集 min-max clip |
+| 模块 | 说明 | 适用场景 |
+|------|------|----------|
+| `NoCorrection` | 无校正 | 默认配置 |
+| `ResidualRegressionCorrector` | 残差回归校正（Ridge） | 系统性偏差修正（可选，保留接口） |
+| `SegmentedLinearCorrector` | 分段线性校正 | 端元效应修正，训练集min-max clip |
 
-**注意**：根据地质学ML传统实践，简单模型（ERT、CatBoost）的校正器使用in-sample预测，StrictOOFStacking使用严格OOF预测。详见代码注释。
+**注意**：根据地质学ML传统实践，简单模型（ERT、CatBoost）的校正器使用in-sample预测，StrictOOFStacking使用严格OOF预测。
 
 ### M4 不确定性模块 (UncertaintyModule)
 
-| 模块 | 说明 |
+| 模块 | 说明 | 参数 |
+|------|------|------|
+| `MCUncertaintyEstimator` | MC 输入扰动 | n_mc=1000, EPMA误差模型 |
+
+**设计亮点**：
+- 使用EPMA误差模型生成输入扰动（与M1对齐）
+- 输出多分位数（p5/p16/p50/p84/p95）
+- 计算校准指标：PICP_68/PICP_90
+
+---
+
+### 2.1`protocol.py` - 协议执行器
+
+| 类 | 职责 | 核心逻辑 |
+|----|------|----------|
+| `Pipeline` | 封装 DM+MM+CM 流程 | `fit()`, `predict()`, `set_correction()` |
+| `StratifiedCVProtocol` | 主协议（P-T 分层 KFold） | 外层 CV + 全局校正器拟合 |
+| `RandomSplitProtocol` | 对照协议 | 随机划分，评估乐观偏差 |
+| `ExperimentConfig` | 实验配置 | dataclass 封装 |
+| `ExperimentMatrix` | 批量运行 | 24 实验 × T/P 双目标 |
+
+**辅助函数**:
+- `_call_pipeline_factory(factory, seed)` - 使用 `inspect.signature()` 安全调用工厂函数
+- `summarize_folds()` - 从 `metrics.py` 导入，计算折叠汇总和置信区间
+
+**新增功能**:
+- **模型保存**: 每个实验自动保存模型到 `results/models/{exp_id}_{target}_model.joblib`
+- **分批保存**: `run_stability_repeats()` 支持 `checkpoint_interval` 参数，每 100 次自动保存 checkpoint
+
+---
+
+### 2.2 `splitters.py` - 数据划分
+
+| 函数 | 功能 |
 |------|------|
-| `MCUncertaintyEstimator` | EPMA 误差模型 MC 扰动，输出中位数 + p16/p84（PICP_68/90） |
+| `compute_pt_edges()` | 计算 P-T 网格边界（k = ceil(sqrt(n))） |
+| `assign_pt_bins()` | 分配样本到 P-T 格子 |
+| `select_test_indices()` | 每个非空格子随机选 1 个样本 |
+
+---
+
+### 2.3 `metrics.py` - 指标计算
+
+| 函数 | 功能 |
+|------|------|
+| `rmse`, `mae`, `r2`, `mape`, `bias` | 基础指标 |
+| `compute_slope_intercept` | 回归诊断 |
+| `summarize_folds` | 折叠汇总 + CI 计算 |
+
+---
+
+### 2.4 `viz.py` - 可视化
+
+| 函数 | 功能 |
+|------|------|
+| `plot_pred_vs_true` | 预测-真实散点图 |
+| `plot_residuals` | 残差分布图 |
+| `plot_fold_comparison` | 各折指标对比 |
+| `plot_experiment_summary` | 实验汇总热力图 |
+| `plot_stepwise_rmse_comparison` | 阶梯误差对比（论文图） |
+| `plot_correction_effect` | 校正前后对比 |
+| `plot_feature_importance` | 特征重要性图 |
 
 ---
 
@@ -158,20 +333,20 @@ CPX氧化物（9个）+ 共存熔体（LIQ）氧化物（9个）：
 
 ### 基础配置（12组）
 
-| Exp ID | M1 数据 | M2 模型 | M3 校正 | 目的 |
-|--------|---------|---------|---------|------|
-| E01 | Raw | ERT | None | 基线 |
-| E02 | Raw | CatBoost | None | Boost基线 |
-| E03 | Raw | Stacking | None | Stacking基线 |
-| E04 | Balanced | ERT | None | M1效应(ERT) |
-| E05 | Balanced | CatBoost | None | M1效应(Boost) |
+| Exp ID | M1 数据 | M2 模型 | M3 校正 | 目的             |
+|-----|---------|---------|---------|----------------|
+| E01 | Raw | ERT | None | 基线             |
+| E02 | Raw | CatBoost | None | Boost基线        |
+| E03 | Raw | Stacking | None | Stacking基线     |
+| E04 | Balanced | ERT | None | M1效应(ERT)      |
+| E05 | Balanced | CatBoost | None | M1效应(Boost)    |
 | E06 | Balanced | Stacking | None | M1效应(Stacking) |
-| E07 | Augmented | ERT | None | M1-Aug效应 |
-| E08 | Augmented | CatBoost | None | M1-Aug效应 |
-| E09 | Raw | CatBoost | Segmented | M3效应 |
-| E10 | Balanced | ERT | Segmented | 完整流程(ERT) |
-| **E11** | **Balanced** | **CatBoost** | **Segmented** | ⭐ **主力配置** |
-| E12 | Balanced | Stacking | Segmented | 边界探索 |
+| E07 | Augmented | ERT | None | M1-Aug效应       |
+| E08 | Augmented | CatBoost | None | M1-Aug效应       |
+| E09 | Raw | CatBoost | Segmented | M3效应           |
+| E10 | Balanced | ERT | Segmented | 完整流程(ERT)      |
+| E11 | Balanced | CatBoost | Segmented | 理论配置           |
+| E12 | Balanced | Stacking | Segmented | 边界探索           |
 
 ### 特征集扩展
 
@@ -218,12 +393,14 @@ CPX氧化物（9个）+ 共存熔体（LIQ）氧化物（9个）：
 
 ```
 results/
-├── experiment_summary.csv   # 各实验指标（逐实验）
-├── metrics_summary.csv      # 汇总指标（mean ± CI）
-├── config_used.yaml         # 实验配置
+├── metrics_summary.csv          # 汇总指标（mean ± CI，含T_test_*/P_test_*）
+├── effect_table.csv             # 模块效应分析表
+├── config_used.yaml             # 实验配置与测试集划分信息
 ├── {exp_id}_{T/P}_fold_metrics.csv    # 每折指标
-├── {exp_id}_{T/P}_predictions.parquet # 逐样本预测
-└── figures/                 # 图表
+├── {exp_id}_{T/P}_predictions.parquet # 逐样本预测（含raw/corr/残差/MC分位数）
+├── models/                      # 保存的模型文件
+│   └── {exp_id}_{target}_model.joblib
+└── figures/                     # 可视化图表
 ```
 
 ---
@@ -238,95 +415,123 @@ results/
 6. **特征集显式标识**：实验ID明确标注特征集（_noliq / _liq）
 ---
 
-## 🔬 实验结果（V3，24组实验 10折交叉验证）
+## 🔬 实验结果（V4.2，24组实验 10折交叉验证）
 
-> 运行日期：2026-01-19 | 数据集：2079样本 | CV策略：P-T分层10折
+> 运行日期：2026-01-22 | 数据集：2079样本 | CV策略：P-T分层10折
 
 ### 最佳配置
 
-| 目标 | 最佳实验 | RMSE | R2 | 配置 |
+| 目标 | 最佳实验 | RMSE | R² | 配置 |
 |------|----------|------|----|------|
-| **温度 T** | E08_catboost_augmented_none_liq | **29.72 °C** | **0.938** | CatBoost + 数据增强 + Liquid |
-| **压力 P** | E08_catboost_augmented_none_liq | **1.85 kbar** | **0.924** | CatBoost + 数据增强 + Liquid |
+| **温度 T** | E07_ert_augmented_none_liq | **30.69 °C** | **0.934** | ERT + 数据增强 + Liquid |
+| **压力 P** | E07_ert_augmented_none_liq | **1.91 kbar** | **0.920** | ERT + 数据增强 + Liquid |
 
-### 全量实验结果
+### 全量实验结果（按 T_RMSE 排序）
 
-| 实验ID | T_RMSE (°C) | T_R2 | P_RMSE (kbar) | P_R2 |
+| 实验ID | T_RMSE (°C) | T_R² | P_RMSE (kbar) | P_R² |
 |--------|-------------|------|---------------|------|
-| E01_ert_raw_none_noliq | 54.40 | 0.794 | 2.41 | 0.872 |
-| E01_ert_raw_none_liq | 32.16 | 0.927 | 2.03 | 0.909 |
-| E02_catboost_raw_none_noliq | 55.60 | 0.785 | 2.46 | 0.866 |
-| E02_catboost_raw_none_liq | 31.35 | 0.931 | 1.97 | 0.914 |
-| E03_stacking_raw_none_noliq | 55.40 | 0.786 | 2.47 | 0.865 |
-| E03_stacking_raw_none_liq | 32.50 | 0.926 | 2.03 | 0.909 |
-| E04_ert_balanced_none_noliq | 54.35 | 0.795 | 2.43 | 0.870 |
-| E04_ert_balanced_none_liq | 32.52 | 0.926 | 2.06 | 0.906 |
-| E05_catboost_balanced_none_noliq | 55.42 | 0.786 | 2.47 | 0.865 |
-| E05_catboost_balanced_none_liq | 31.16 | 0.932 | 1.97 | 0.914 |
-| E06_stacking_balanced_none_noliq | 55.96 | 0.782 | 2.51 | 0.861 |
-| E06_stacking_balanced_none_liq | 32.80 | 0.925 | 2.06 | 0.906 |
-| E07_ert_augmented_none_noliq | 52.42 | 0.809 | 2.31 | 0.882 |
-| E07_ert_augmented_none_liq | 30.69 | 0.934 | 1.91 | 0.920 |
-| E08_catboost_augmented_none_noliq | 54.14 | 0.795 | 2.34 | 0.879 |
-| **E08_catboost_augmented_none_liq** ⭐ | **29.72** | **0.938** | **1.85** | **0.924** |
-| E09_catboost_raw_segmented_noliq | 55.47 | 0.786 | 2.45 | 0.868 |
-| E09_catboost_raw_segmented_liq | 31.10 | 0.932 | 1.94 | 0.916 |
-| E10_ert_balanced_segmented_noliq | 53.67 | 0.799 | 2.39 | 0.874 |
+| **E07_ert_augmented_none_liq** ⭐ | **30.69** | **0.934** | **1.91** | **0.920** |
+| E08_catboost_augmented_none_liq | 31.17 | 0.932 | 1.92 | 0.917 |
 | E10_ert_balanced_segmented_liq | 31.82 | 0.929 | 1.99 | 0.911 |
-| E11_catboost_balanced_segmented_noliq | 56.30 | 0.779 | 2.48 | 0.864 |
-| E11_catboost_balanced_segmented_liq | 31.18 | 0.932 | 1.94 | 0.916 |
-| E12_stacking_balanced_segmented_noliq | 56.96 | 0.774 | 2.52 | 0.860 |
-| E12_stacking_balanced_segmented_liq | 33.25 | 0.923 | 2.05 | 0.906 |
+| E01_ert_raw_none_liq | 32.16 | 0.927 | 2.03 | 0.909 |
+| E03_stacking_raw_none_liq | 32.43 | 0.926 | 2.03 | 0.908 |
+| E04_ert_balanced_none_liq | 32.52 | 0.926 | 2.06 | 0.906 |
+| E12_stacking_balanced_segmented_liq | 32.69 | 0.925 | 2.04 | 0.908 |
+| E06_stacking_balanced_none_liq | 32.83 | 0.924 | 2.07 | 0.905 |
+| E09_catboost_raw_segmented_liq | 36.86 | 0.905 | 2.23 | 0.890 |
+| E11_catboost_balanced_segmented_liq | 36.92 | 0.905 | 2.25 | 0.888 |
+| E02_catboost_raw_none_liq | 36.96 | 0.904 | 2.26 | 0.887 |
+| E05_catboost_balanced_none_liq | 37.00 | 0.904 | 2.30 | 0.883 |
+| **E07_ert_augmented_none_noliq** | **52.42** | **0.809** | **2.31** | **0.882** |
+| E10_ert_balanced_segmented_noliq | 53.67 | 0.799 | 2.39 | 0.874 |
+| E04_ert_balanced_none_noliq | 54.35 | 0.795 | 2.43 | 0.870 |
+| E01_ert_raw_none_noliq | 54.40 | 0.794 | 2.41 | 0.872 |
+| E08_catboost_augmented_none_noliq | 54.82 | 0.791 | 2.37 | 0.877 |
+| E03_stacking_raw_none_noliq | 54.85 | 0.791 | 2.46 | 0.867 |
+| E12_stacking_balanced_segmented_noliq | 55.14 | 0.788 | 2.48 | 0.864 |
+| E06_stacking_balanced_none_noliq | 55.35 | 0.787 | 2.50 | 0.862 |
+| E09_catboost_raw_segmented_noliq | 59.84 | 0.750 | 2.64 | 0.846 |
+| E02_catboost_raw_none_noliq | 60.04 | 0.749 | 2.65 | 0.844 |
+| E11_catboost_balanced_segmented_noliq | 60.66 | 0.743 | 2.65 | 0.845 |
+| E05_catboost_balanced_none_noliq | 60.88 | 0.742 | 2.68 | 0.842 |
 
 ### 模块效应分析
 
-#### 特征集效应（最显著）
+#### 特征集效应（最显著，↓40% RMSE）
 
-| 特征集 | T_RMSE | T_R2 | P_RMSE | P_R2 | 提升幅度 |
-|--------|--------|------|--------|------|----------|
-| NoLiquid (9特征) | 55.01 | 0.789 | 2.44 | 0.869 | 基线 |
-| **Liquid (18特征)** | **31.69** | **0.929** | **1.98** | **0.913** | T: **-42%**, P: -19% |
+| 特征集 | T_RMSE (°C) | T_R² | P_RMSE (kbar) | P_R² | 改善幅度 |
+|--------|-------------|------|---------------|------|----------|
+| NoLiquid (9特征) | 56.37 ± 3.05 | 0.778 | 2.50 ± 0.13 | 0.862 | 基线 |
+| **Liquid (18特征)** | **33.67 ± 2.49** | **0.920** | **2.09 ± 0.13** | **0.903** | T: **↓40%**, P: ↓16% |
 
-> ⭐ **关键发现**：加入熔体成分使温度预测RMSE降低42%，R2从0.79升至0.93
+> ⭐ **关键发现**：加入熔体成分使温度预测RMSE降低约40%（56.4→33.7°C），R²从0.78升至0.92
 
-#### 模型效应
+#### 模型效应（Liquid 特征集）
 
-| 模型 | T_RMSE | T_R2 | P_RMSE | P_R2 |
-|------|--------|------|--------|------|
-| **ERT** | 42.75 | 0.864 | 2.19 | 0.893 |
-| CatBoost | 43.15 | 0.860 | 2.19 | 0.893 |
-| Stacking | 44.48 | 0.853 | 2.27 | 0.884 |
+| 模型 | T_RMSE (°C) | T_R² | P_RMSE (kbar) | P_R² |
+|------|-------------|------|---------------|------|
+| **ERT** | **31.80 ± 0.79** | **0.929** | **2.00 ± 0.07** | **0.912** |
+| CatBoost | 35.78 ± 2.58 | 0.910 | 2.19 ± 0.15 | 0.893 |
+| Stacking | 32.65 ± 0.20 | 0.925 | 2.05 ± 0.02 | 0.907 |
 
-> 模型间差异较小（<2%），ERT略优，单模型最佳组合为CatBoost+Augmented+Liquid
+> ERT 表现最优且方差最小（最稳定），CatBoost 在 Augmented 配置下接近 ERT
 
-#### 数据模块效应
+#### 数据模块效应（Liquid 特征集）
 
-| 数据处理 | T_RMSE | T_R2 | P_RMSE | P_R2 |
-|----------|--------|------|--------|------|
-| Raw | 43.50 | 0.859 | 2.22 | 0.890 |
-| Balanced | 43.78 | 0.857 | 2.24 | 0.888 |
-| **Augmented** | **41.74** | **0.869** | **2.10** | **0.901** |
+| 数据处理 | T_RMSE (°C) | T_R² | P_RMSE (kbar) | P_R² |
+|----------|-------------|------|---------------|------|
+| Raw | 34.61 ± 2.67 | 0.916 | 2.14 ± 0.12 | 0.899 |
+| Balanced | 33.96 ± 2.35 | 0.919 | 2.12 ± 0.12 | 0.900 |
+| **Augmented** | **30.93 ± 0.35** | **0.933** | **1.92 ± 0.01** | **0.919** |
 
-> 数据增强略有帮助（T_RMSE -1.75 °C，P_RMSE -0.12 kbar），Balanced与Raw接近
+> 数据增强带来稳定提升：T_RMSE ↓3-4°C，P_RMSE ↓0.2 kbar
 
-#### 校正模块效应
+#### 校正模块效应（Liquid 特征集）
 
-| 校正方式 | T_RMSE | T_R2 | P_RMSE | P_R2 |
-|----------|--------|------|--------|------|
-| **None** | **43.16** | **0.861** | **2.21** | **0.891** |
-| Segmented | 43.72 | 0.857 | 2.22 | 0.889 |
+| 校正方式 | T_RMSE (°C) | P_RMSE (kbar) |
+|----------|-------------|---------------|
+| **None** | **33.22 ± 2.43** | **2.07 ± 0.14** |
+| Segmented | 34.57 ± 2.70 | 2.13 ± 0.13 |
 
-> Segmented 校正在当前数据集上无明显提升
+> Segmented 校正在当前数据集上无改善，略有负面影响
 
 ### 结论与建议
 
-1. **推荐配置**：`CatBoost + Augmented + Liquid` (E08)
-2. **特征选择**：若有熔体成分数据，**必须使用Liquid特征集**
-3. **数据模块**：Augmented带来小幅收益，Balanced与Raw基本一致
-4. **校正策略**：Segmented在全局平均上无显著收益，暂不作为默认
+1. **推荐配置**：`ERT + Augmented + Liquid` (E07)
+2. **特征选择**：若有熔体成分数据，**必须使用Liquid特征集**（T_RMSE提升40%）
+3. **数据模块**：Augmented带来稳定收益（T_RMSE ↓3-4°C）
+4. **模型选择**：ERT 最优且最稳定，CatBoost 次之
+5. **校正策略**：当前数据集上 Segmented 无收益，保持 None
 
 ---
 ## 变更日志
+
+### 2026-01-22（V4.2）更新
+
+**结果分析与验证**：
+- 完成 24 组实验全量运行，验证所有修改正确实施
+- 生成离线绘图（16张图表）和 MC 不确定性量化结果
+
+**核心结论**：
+1. **特征集效应最显著**：Liquid 使 T_RMSE ↓40%（56.4→33.7°C）
+2. **数据增强稳定有效**：Augmented 使 T_RMSE ↓3-4°C
+3. **模型选择影响有限**：ERT 最优且最稳定
+4. **校正策略无显著收益**：Segmented 在当前数据集无改善
+
+**推荐配置**：`ERT + Augmented + Liquid`（T_RMSE=30.69°C, R²=0.934）
+
+### 2026-01-21（V4.1）更新
+
+- MC 不确定性测试样本数从 100 调整为 10（扰动次数 n_mc=1000 保持不变）
+
+### 2026-01-21（V4）更新
+
+- 重命名 GroupCVProtocol → StratifiedCVProtocol，明确仅使用分层CV
+- 主实验输出新增固定测试集指标（T_test_*/P_test_*）
+- metrics_summary.csv 现采用追加+按 exp_id 去重策略（保留最新）
+- summarize_results.py 将测试集指标合并至 experiment_summary.csv
+- CatBoost GPU 自动检测 + n_jobs 自动配置（Windows 默认为 1）
+- summarize_folds 默认计算置信区间（ddof=1, dropna）
 
 ### 2026-01-19（V3）更新
 
@@ -354,22 +559,8 @@ results/
 
 ### 2026-01-19（V2）更新
 
-**主要变更**：
-1. ✅ 新增特征集管理：支持NoLiquid（9特征）和Liquid（18特征）两种特征集
-2. ✅ 移除Ref分组约束：从StratifiedGroupKFold改为StratifiedKFold
-3. ✅ 简化测试集划分：纯P-T网格采样，不再尝试保持Ref完整性
-4. ✅ 添加OOF说明注释：明确地质学ML传统实践与严格OOF的区别
-5. ✅ 实验数量扩展：从12个扩展到24个（12基础配置 × 2特征集）
-6. ✅ 完成24个实验全量运行并生成结果分析
-
-**影响**：
-- 运行时间翻倍（24个实验 vs 12个）
-- P-T分布平衡性提升
-- 同一文献样本可能跨训练/验证集（已知限制，优先保证P-T平衡）
-
-#### V2 实验结果（原实验结果区）
-
-> 运行日期：2026-01-19 | 数据集：2079样本 | CV策略：P-T分层10折
+- 新增双特征集支持（NoLiquid/Liquid），实验扩展至24组
+- 移除Ref分组约束，改用P-T网格分层
 
 ##### 最佳配置
 
@@ -378,102 +569,19 @@ results/
 | **温度 T** | E08_catboost_augmented_none_liq | **30.72 °C** | **0.934** | CatBoost + 数据增强 + Liquid |
 | **压力 P** | E08_catboost_augmented_none_liq | **1.93 kbar** | **0.917** | CatBoost + 数据增强 + Liquid |
 
-##### 全量实验结果
-
-| 实验ID | T_RMSE (°C) | T_R2 | P_RMSE (kbar) | P_R2 |
-|--------|-------------|------|---------------|------|
-| E01_ert_raw_none_noliq | 54.40 | 0.794 | 2.41 | 0.872 |
-| E01_ert_raw_none_liq | 32.16 | 0.927 | 2.03 | 0.909 |
-| E02_catboost_raw_none_noliq | 55.60 | 0.785 | 2.46 | 0.866 |
-| E02_catboost_raw_none_liq | 31.35 | 0.931 | 1.97 | 0.914 |
-| E03_stacking_raw_none_noliq | 55.40 | 0.786 | 2.47 | 0.865 |
-| E03_stacking_raw_none_liq | 32.50 | 0.926 | 2.03 | 0.909 |
-| E04_ert_balanced_none_noliq | 54.35 | 0.795 | 2.43 | 0.870 |
-| E04_ert_balanced_none_liq | 32.52 | 0.926 | 2.06 | 0.906 |
-| E05_catboost_balanced_none_noliq | 55.42 | 0.786 | 2.47 | 0.865 |
-| E05_catboost_balanced_none_liq | 31.16 | 0.932 | 1.97 | 0.914 |
-| E06_stacking_balanced_none_noliq | 55.96 | 0.782 | 2.51 | 0.861 |
-| E06_stacking_balanced_none_liq | 32.80 | 0.925 | 2.06 | 0.906 |
-| E07_ert_augmented_none_noliq | 53.23 | 0.803 | 2.35 | 0.879 |
-| E07_ert_augmented_none_liq | 31.51 | 0.930 | 1.98 | 0.914 |
-| **E08_catboost_augmented_none_noliq** | 54.43 | 0.794 | 2.37 | 0.877 |
-| **E08_catboost_augmented_none_liq** ⭐ | **30.72** | **0.934** | **1.93** | **0.917** |
-| E09_catboost_raw_residual_noliq | 55.54 | 0.786 | 2.46 | 0.867 |
-| E09_catboost_raw_residual_liq | 31.18 | 0.932 | 1.96 | 0.915 |
-| E10_ert_balanced_residual_noliq | 53.79 | 0.799 | 2.41 | 0.872 |
-| E10_ert_balanced_residual_liq | 31.90 | 0.929 | 2.02 | 0.910 |
-| E11_catboost_balanced_residual_noliq | 55.36 | 0.787 | 2.47 | 0.866 |
-| E11_catboost_balanced_residual_liq | 31.03 | 0.932 | 1.96 | 0.914 |
-| E12_stacking_balanced_residual_noliq | 55.94 | 0.782 | 2.51 | 0.861 |
-| E12_stacking_balanced_residual_liq | 32.78 | 0.925 | 2.06 | 0.906 |
-
-##### 模块效应分析
-
-###### 特征集效应（最显著）
-
-| 特征集 | T_RMSE | T_R2 | P_RMSE | P_R2 | 提升幅度 |
-|--------|--------|------|--------|------|----------|
-| NoLiquid (9特征) | 54.95 | 0.790 | 2.44 | 0.868 | 基线 |
-| **Liquid (18特征)** | **31.80** | **0.929** | **2.00** | **0.911** | T: **-42%**, P: -18% |
-
-> ⭐ **关键发现**：加入熔体成分使温度预测RMSE降低42%，R2从0.79升至0.93
-
-###### 模型效应
-
-| 模型 | T_RMSE | T_R2 | P_RMSE | P_R2 |
-|------|--------|------|--------|------|
-| ERT | 42.98 | 0.863 | 2.21 | 0.891 |
-| **CatBoost** | **43.18** | **0.860** | **2.20** | **0.892** |
-| Stacking | 44.23 | 0.854 | 2.27 | 0.885 |
-
-> 模型间差异较小（<3%），CatBoost在Liquid特征集下表现最优
-
-###### 数据模块效应
-
-| 数据处理 | T_RMSE | T_R2 | P_RMSE | P_R2 |
-|----------|--------|------|--------|------|
-| Raw | 43.52 | 0.859 | 2.22 | 0.890 |
-| Balanced | 43.58 | 0.858 | 2.24 | 0.888 |
-| **Augmented** | **42.47** | **0.865** | **2.16** | **0.896** |
-
-> 数据增强略有帮助，但效果不如特征集选择显著
-
-###### 校正模块效应
-
-| 校正方式 | T_RMSE | T_R2 | P_RMSE | P_R2 |
-|----------|--------|------|--------|------|
-| None | 43.34 | 0.860 | 2.22 | 0.890 |
-| Residual | 43.44 | 0.859 | 2.23 | 0.889 |
-
-> Residual校正在当前数据集上无显著提升
-
-##### 结论与建议
-
-1. **推荐配置**：`CatBoost + Augmented + Liquid` (E08)
-2. **特征选择**：若有熔体成分数据，**必须使用Liquid特征集**
-3. **模型选择**：CatBoost和ERT表现相当，Stacking收益有限
-4. **校正策略**：当前数据集不需要Residual校正
+- **主要结论**：Liquid特征集使T_RMSE降低约42%
 
 ---
 
 ### 2026-01-18（V1）更新
 
-**运行概况**：
-- 完成12个基础实验矩阵（使用StratifiedGroupKFold）
-- 测试集使用P-T网格一次性划分，test_size=349
+- 完成12个基础实验矩阵（StratifiedKFold）
+- 修复Windows兼容性问题（n_jobs=1, 编码问题）
+- 生成初步结果汇总
 
-**初步结果**（12个实验，无特征集扩展）：
 - 最佳T模型：E11_catboost_balanced_residual（T_RMSE=42.65, T_R2=0.865）
 - 最佳P模型：E08_catboost_augmented_none（P_RMSE=2.64, P_R2=0.826）
 
-**问题修复**：
-- WinError 5：设置n_jobs=1避免joblib权限错误
-- PowerShell编码：移除emoji避免GBK控制台打印异常
-- 稳定性测试：因运行时间长暂时禁用（CONFIG['run_stability']=False）
-
-**临时策略**：
-- 树模型n_jobs默认为1
-- 稳定性测试默认关闭
 ## 参考文献
 
 Jorgenson et al. (2022). A Machine Learning‐Based Approach to Clinopyroxene Thermobarometry: Model Optimization and Distribution for Use in Earth Sciences. *Journal of Geophysical Research*.

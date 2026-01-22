@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Chapter 3 Benchmark Protocol - M3 校正模块实现
-Correction Modules: NoCorrection, ResidualRegressionCorrector
-
-核心约束：
-1. fit() 应优先使用 OOF 预测以避免过拟合
-2. 校正模型只能在训练折的（真值，OOF预测）上拟合
+M3 校正模块 - NoCorrection, ResidualRegressionCorrector, SegmentedLinearCorrector
 
 【地质学ML传统实践说明】
 在地质学领域的机器学习实践中，简单模型（ERT、CatBoost、RandomForest）的
@@ -25,12 +20,8 @@ from .interfaces import CorrectionModule
 # ============================================================
 
 class NoCorrection(CorrectionModule):
-    """
-    无校正 - 直接返回原始预测
-    
-    作为对照基线，不进行任何偏差校正
-    """
-    
+    """无校正 - 直接返回原始预测"""
+
     def fit(self, 
             y_true_train: np.ndarray, 
             y_pred_train: np.ndarray) -> Any:
