@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Chapter 3 Benchmark Protocol - M2 模型模块实现
-Model Modules: ExtraTreesModel, CatBoostModel, StrictOOFStacking
+M2 模型模块 - ExtraTreesModel, CatBoostModel, StrictOOFStacking
 
-核心约束：
-1. fit() 只使用训练集数据
-2. Stacking 必须严格 OOF：内层 CV 生成元特征，禁止数据泄露
-3. 支持样本权重传递
+约束：Stacking使用严格OOF，内层CV生成元特征，禁止数据泄露
 """
 
+import os
 import time
 import numpy as np
 from typing import Any, Dict, List, Optional
@@ -19,32 +16,52 @@ from .interfaces import ModelModule
 
 
 # ============================================================
+# 并行配置辅助函数
+# ============================================================
+
+def _get_default_n_jobs() -> int:
+    """获取默认n_jobs：Windows=1，其他=-1"""
+    if os.name == 'nt':
+        return 1
+    return -1
+
+
+def _detect_catboost_gpu() -> Dict[str, Any]:
+    """检测CatBoost GPU可用性"""
+    try:
+        from catboost.utils import get_gpu_device_count
+        if get_gpu_device_count() >= 1:
+            return {'task_type': 'GPU', 'devices': '0'}
+    except Exception:
+        pass
+    return {}
+
+
+# ============================================================
 # ExtraTrees 模型（基线）
 # ============================================================
 
 class ExtraTreesModel(ModelModule):
-    """
-    ExtraTrees 回归模型 - 传统集成基线
-    
-    特点：
-    - 高方差低偏差
-    - 训练速度快
-    - 抗过拟合能力较弱
-    """
-    
+    """ExtraTrees回归模型 - 集成基线"""
+
     def __init__(self, 
                  n_estimators: int = 200,
                  max_depth: int = 15,
                  min_samples_split: int = 5,
-                 n_jobs: int = 1,
-                 random_state: int = 42,
+                 n_jobs: Optional[int] = None,
+                 random_seed: int = 42,
                  **kwargs):
+        # n_jobs=None 表示自动检测
+        if n_jobs is None:
+            n_jobs = _get_default_n_jobs()
+        
+        # 外部统一使用 random_seed，内部转换为 sklearn 的 random_state
         self.params = {
             'n_estimators': n_estimators,
             'max_depth': max_depth,
             'min_samples_split': min_samples_split,
             'n_jobs': n_jobs,
-            'random_state': random_state,
+            'random_state': random_seed,  # sklearn 使用 random_state
             **kwargs
         }
         self._training_time = 0.0
@@ -96,7 +113,16 @@ class CatBoostModel(ModelModule):
                  loss_function: str = 'RMSE',
                  random_seed: int = 42,
                  silent: bool = True,
+                 task_type: Optional[str] = None,
+                 gpu_devices: str = '0',
                  **kwargs):
+        # GPU 自动检测
+        gpu_params = {}
+        if task_type is None:
+            gpu_params = _detect_catboost_gpu()
+        elif task_type.upper() == 'GPU':
+            gpu_params = {'task_type': 'GPU', 'devices': gpu_devices}
+        
         self.params = {
             'iterations': iterations,
             'depth': depth,
@@ -104,6 +130,7 @@ class CatBoostModel(ModelModule):
             'loss_function': loss_function,
             'random_seed': random_seed,
             'verbose': False if silent else 100,
+            **gpu_params,
             **kwargs
         }
         self._training_time = 0.0
@@ -148,15 +175,20 @@ class RandomForestModel(ModelModule):
                  n_estimators: int = 200,
                  max_depth: int = 15,
                  min_samples_split: int = 5,
-                 n_jobs: int = 1,
-                 random_state: int = 42,
+                 n_jobs: Optional[int] = None,
+                 random_seed: int = 42,
                  **kwargs):
+        # n_jobs=None 表示自动检测
+        if n_jobs is None:
+            n_jobs = _get_default_n_jobs()
+        
+        # 外部统一使用 random_seed，内部转换为 sklearn 的 random_state
         self.params = {
             'n_estimators': n_estimators,
             'max_depth': max_depth,
             'min_samples_split': min_samples_split,
             'n_jobs': n_jobs,
-            'random_state': random_state,
+            'random_state': random_seed,  # sklearn 使用 random_state
             **kwargs
         }
         self._training_time = 0.0
@@ -181,6 +213,10 @@ class RandomForestModel(ModelModule):
     def predict(self, model: Any, X: np.ndarray) -> np.ndarray:
         """预测"""
         return model.predict(X)
+
+    def get_feature_importance(self, model: Any) -> np.ndarray:
+        """获取特征重要性"""
+        return model.feature_importances_
 
 
 # ============================================================
@@ -228,11 +264,12 @@ class StrictOOFStacking(ModelModule):
         self.random_seed = random_seed
         
         # 默认基模型：ERT + CatBoost + RF
+        # 注意：基模型参数与单模型实验保持一致，确保公平对比
         if base_models is None:
             self.base_models = [
-                ExtraTreesModel(n_estimators=100, max_depth=12, random_state=random_seed),
-                CatBoostModel(iterations=500, depth=5, random_seed=random_seed),
-                RandomForestModel(n_estimators=100, max_depth=12, random_state=random_seed),
+                ExtraTreesModel(n_estimators=200, max_depth=15, random_seed=random_seed),
+                CatBoostModel(iterations=1000, depth=6, random_seed=random_seed),
+                RandomForestModel(n_estimators=200, max_depth=15, random_seed=random_seed),
             ]
         else:
             self.base_models = base_models
@@ -387,6 +424,50 @@ class StrictOOFStacking(ModelModule):
     def get_meta_weights(self, model_dict: Dict[str, Any]) -> Optional[np.ndarray]:
         """返回元模型权重（如果是线性模型）"""
         return self.meta_model.get_weights(model_dict['meta'])
+
+    def get_feature_importance(self, model_dict: Dict[str, Any]) -> Optional[np.ndarray]:
+        """
+        获取特征重要性（基于基模型的加权平均）
+
+        对于 Stacking 模型，返回各基模型特征重要性的加权平均，
+        权重为元模型的系数（如果可用）。
+
+        Returns
+        -------
+        np.ndarray or None
+            特征重要性数组，如果无法计算则返回 None
+        """
+        if not self._fitted_base_models:
+            return None
+
+        # 获取元模型权重作为加权系数
+        meta_weights = self.get_meta_weights(model_dict)
+        if meta_weights is None:
+            # 如果没有权重，使用等权平均
+            meta_weights = np.ones(len(self._fitted_base_models)) / len(self._fitted_base_models)
+        else:
+            # 归一化为正权重
+            meta_weights = np.abs(meta_weights)
+            meta_weights = meta_weights / meta_weights.sum()
+
+        # 收集各基模型的特征重要性
+        importances_list = []
+        for i, (base_mod, fitted_model) in enumerate(zip(self.base_models, self._fitted_base_models)):
+            try:
+                if hasattr(base_mod, 'get_feature_importance'):
+                    imp = base_mod.get_feature_importance(fitted_model)
+                    if imp is not None:
+                        importances_list.append((meta_weights[i], imp))
+            except Exception:
+                continue
+
+        if not importances_list:
+            return None
+
+        # 加权平均
+        total_weight = sum(w for w, _ in importances_list)
+        weighted_imp = sum(w * imp for w, imp in importances_list) / total_weight
+        return weighted_imp
 
 
 # ============================================================

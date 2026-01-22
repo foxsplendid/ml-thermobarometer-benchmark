@@ -1,12 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Chapter 3 Benchmark Protocol - M1 数据模块实现
-Data Modules: RawDataModule, BalancedDataModule, AugmentedDataModule
+M1 数据模块 - RawDataModule, BalancedDataModule, AugmentedDataModule
 
-核心约束：
-1. 所有拟合操作（scaler, binning）只在训练折进行
-2. 验证折仅应用变换，禁止重新拟合
-3. 样本权重只用于训练，验证时返回 None
+约束：拟合操作仅在训练折进行，验证折仅应用变换
 """
 
 import numpy as np
@@ -17,16 +13,12 @@ from .interfaces import DataModule, DataModuleState
 
 
 # ============================================================
-# Raw 数据模块（仅标准化）
+# Raw 数据模块
 # ============================================================
 
 class RawDataModule(DataModule):
-    """
-    原始数据模块 - 仅进行标准化
-    
-    这是最基础的数据处理，作为其他模块的对照基线
-    """
-    
+    """原始数据模块 - 仅标准化，作为基线"""
+
     def __init__(self, random_seed: int = 42):
         self.random_seed = random_seed
     
@@ -194,21 +186,21 @@ class AugmentedDataModule(DataModule):
         self.error_threshold = error_threshold
         self.clip_min = clip_min
 
-    def _epma_perturb(self, X_raw: np.ndarray) -> np.ndarray:
+    def _epma_perturb(self, X_raw: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
         rel_err = np.where(
             np.abs(X_raw) > self.error_threshold,
             self.rel_err_high,
             self.rel_err_low
         )
         scale = rel_err * np.abs(X_raw)
-        noise = np.random.normal(0.0, scale, size=X_raw.shape)
+        noise = rng.normal(0.0, scale, size=X_raw.shape)
         X_augmented = X_raw + noise
         if self.clip_min is not None:
             X_augmented = np.maximum(X_augmented, self.clip_min)
         return X_augmented
 
-    def _gaussian_perturb(self, X_raw: np.ndarray, feature_std: np.ndarray) -> np.ndarray:
-        noise = np.random.normal(0.0, self.noise_level, X_raw.shape) * feature_std
+    def _gaussian_perturb(self, X_raw: np.ndarray, feature_std: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
+        noise = rng.normal(0.0, self.noise_level, X_raw.shape) * feature_std
         X_augmented = X_raw + noise
         if self.clip_min is not None:
             X_augmented = np.maximum(X_augmented, self.clip_min)
@@ -221,7 +213,8 @@ class AugmentedDataModule(DataModule):
                       groups_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """Standardize and generate augmented samples."""
-        np.random.seed(self.random_seed)
+        # 使用隔离的 RandomState，避免污染全局随机状态
+        rng = np.random.RandomState(self.random_seed)
 
         # 1. Feature std for Gaussian fallback
         feature_std = np.std(X_train, axis=0)
@@ -236,9 +229,9 @@ class AugmentedDataModule(DataModule):
 
         for _ in range(self.n_aug):
             if self.error_model == "epma":
-                X_augmented = self._epma_perturb(X_train)
+                X_augmented = self._epma_perturb(X_train, rng)
             else:
-                X_augmented = self._gaussian_perturb(X_train, feature_std)
+                X_augmented = self._gaussian_perturb(X_train, feature_std, rng)
             X_list.append(X_augmented)
             y_list.append(y_train)
 

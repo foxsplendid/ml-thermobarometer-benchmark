@@ -159,7 +159,7 @@ def compute_metrics_by_target(y_T_true: np.ndarray, y_T_pred: np.ndarray,
 # ============================================================
 
 def summarize_folds(fold_metrics: List[Dict[str, float]],
-                    compute_ci: bool = False,
+                    compute_ci: bool = True,
                     ci_level: float = 0.95) -> Dict[str, float]:
     """
     汇总各折的指标（计算均值和标准差）
@@ -168,7 +168,7 @@ def summarize_folds(fold_metrics: List[Dict[str, float]],
     ----------
     fold_metrics : List[Dict[str, float]]
         各折的指标列表
-    compute_ci : bool, default=False
+    compute_ci : bool, default=True
         是否计算置信区间
     ci_level : float, default=0.95
         置信水平
@@ -186,17 +186,28 @@ def summarize_folds(fold_metrics: List[Dict[str, float]],
 
     summary = {}
     for col in numeric_cols:
-        values = df[col].values
+        values = df[col].dropna().values
+        if len(values) == 0:
+            summary[f'{col}_mean'] = np.nan
+            summary[f'{col}_std'] = np.nan
+            if compute_ci:
+                summary[f'{col}_ci_lower'] = np.nan
+                summary[f'{col}_ci_upper'] = np.nan
+            continue
+
         summary[f'{col}_mean'] = np.mean(values)
-        summary[f'{col}_std'] = np.std(values)
+        summary[f'{col}_std'] = np.std(values, ddof=1) if len(values) > 1 else np.nan
 
         if compute_ci:
-            from scipy import stats
-            n = len(values)
-            se = stats.sem(values)
-            ci = stats.t.interval(ci_level, n - 1, loc=np.mean(values), scale=se)
-            summary[f'{col}_ci_lower'] = ci[0]
-            summary[f'{col}_ci_upper'] = ci[1]
+            if len(values) > 2:
+                from scipy import stats
+                se = stats.sem(values, ddof=1)
+                ci = stats.t.interval(ci_level, len(values) - 1, loc=np.mean(values), scale=se)
+                summary[f'{col}_ci_lower'] = ci[0]
+                summary[f'{col}_ci_upper'] = ci[1]
+            else:
+                summary[f'{col}_ci_lower'] = np.nan
+                summary[f'{col}_ci_upper'] = np.nan
 
     return summary
 

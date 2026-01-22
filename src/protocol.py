@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Chapter 3 Benchmark Protocol - 协议执行器
-Protocol: Pipeline, GroupCVProtocol, RandomSplitProtocol, ExperimentMatrix
-
-核心功能：
-1. Pipeline：封装 DataModule + ModelModule + CorrectionModule
-2. GroupCVProtocol：主协议（GroupKFold，10折）
-3. RandomSplitProtocol：对照协议（Random Split）
-4. ExperimentMatrix：实验矩阵执行器
+协议执行器 - Pipeline, StratifiedCVProtocol, ExperimentMatrix
 """
 
 import os
@@ -21,6 +14,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from .interfaces import DataModule, ModelModule, CorrectionModule, UncertaintyModule, DataModuleState
+from .metrics import summarize_folds
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
+def _call_pipeline_factory(factory: Callable, seed: int) -> 'Pipeline':
+    """安全调用pipeline factory"""
+    try:
+        return factory(seed)
+    except TypeError:
+        return factory()
 
 # ============================================================
 # Pipeline 类
@@ -61,8 +67,9 @@ class Pipeline:
         流程：
         1. 数据处理（标准化、增强等）
         2. 模型训练
-        3. 获取 OOF 预测
-        4. 拟合偏差校正器
+
+        注意：校正器拟合在协议层（StratifiedCVProtocol）全局完成，
+        不在Pipeline内部拟合，避免重复拟合和逻辑混淆。
         """
         # 1. 数据处理
         X2, y2, weights, self._state = self.data_module.fit_transform(
@@ -88,17 +95,6 @@ class Pipeline:
         
         # 2. 模型训练
         self._model = self.model_module.fit(X2, y2, weights, groups2, stratify_labels=stratify2)
-        
-        # 3. 获取 OOF 预测（用于偏差校正）
-        # 注意：简单模型（ERT/CatBoost）使用in-sample预测（地质学ML传统做法）
-        # StrictOOFStacking使用真正的inner CV OOF预测
-        y_oof = self.model_module.get_oof_predictions(
-            self._model, X2, y2, groups2, weights, stratify_labels=stratify2
-        )
-
-        # 4. 拟合偏差校正器
-        # 警告：如果y_oof是in-sample预测，校正器可能轻微过拟合
-        self._corr_model = self.corr_module.fit(y2, y_oof)
         
         self._is_fitted = True
         return self
@@ -153,6 +149,20 @@ class Pipeline:
     def get_name(self) -> str:
         """返回管道名称"""
         return f"{self.data_module.get_name()}_{self.model_module.get_name()}_{self.corr_module.get_name()}"
+    
+    def set_correction(self, corr_module: CorrectionModule, corr_model: Any) -> None:
+        """
+        设置校正模块和校正模型（用于全局校正器场景）
+        
+        Parameters
+        ----------
+        corr_module : CorrectionModule
+            校正模块实例
+        corr_model : Any
+            已拟合的校正模型
+        """
+        self.corr_module = corr_module
+        self._corr_model = corr_model
 
 # ============================================================
 # 指标计算函数
@@ -239,59 +249,15 @@ def compute_all_metrics(y_true: np.ndarray,
     
     return metrics
 
-def summarize_folds(fold_metrics: List[Dict[str, float]],
-                    compute_ci: bool = True,
-                    ci_level: float = 0.95) -> Dict[str, float]:
-    """
-    汇总各折指标，计算均值和置信区间
-    
-    Parameters
-    ----------
-    fold_metrics : List[Dict]
-        各折指标列表
-    compute_ci : bool
-        是否计算置信区间
-    ci_level : float
-        置信水平
-        
-    Returns
-    -------
-    summary : dict
-        汇总指标（包含 _mean, _std, _ci_lower, _ci_upper）
-    """
-    from scipy import stats
-    
-    df = pd.DataFrame(fold_metrics)
-    summary = {}
-    
-    for col in df.columns:
-        if col in ['fold_id']:
-            continue
-        
-        values = df[col].dropna().values
-        if len(values) == 0:
-            continue
-        
-        summary[f'{col}_mean'] = np.mean(values)
-        summary[f'{col}_std'] = np.std(values, ddof=1) if len(values) > 1 else 0.0
-        
-        if compute_ci and len(values) > 2:
-            # t 分布置信区间
-            n = len(values)
-            se = summary[f'{col}_std'] / np.sqrt(n)
-            t_val = stats.t.ppf((1 + ci_level) / 2, n - 1)
-            summary[f'{col}_ci_lower'] = summary[f'{col}_mean'] - t_val * se
-            summary[f'{col}_ci_upper'] = summary[f'{col}_mean'] + t_val * se
-    
-    return summary
+# summarize_folds 已移至 metrics.py，通过顶部导入使用
 
 # ============================================================
-# Group CV Protocol（主协议）
+# Stratified CV Protocol（主协议）
 # ============================================================
 
-class GroupCVProtocol:
+class StratifiedCVProtocol:
     """
-    主协议：Group K-Fold 交叉验证
+    主协议：Stratified K-Fold 交叉验证
     
     核心约束：
     - 按文献来源（group_id）分组
@@ -315,7 +281,7 @@ class GroupCVProtocol:
             stratify_labels: Optional[np.ndarray] = None,
             verbose: bool = True) -> Dict[str, Any]:
         """
-        执行 Group K-Fold CV
+        执行 Stratified K-Fold CV
         
         Parameters
         ----------
@@ -374,10 +340,7 @@ class GroupCVProtocol:
             groups_train = groups[train_idx]
             stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
 
-            try:
-                pipeline = pipeline_factory(self.random_seed)
-            except TypeError:
-                pipeline = pipeline_factory()
+            pipeline = _call_pipeline_factory(pipeline_factory, self.random_seed)
 
             pipeline.fit(X_train, y_train, groups_train, stratify_labels=stratify_train)
 
@@ -421,8 +384,7 @@ class GroupCVProtocol:
 
             if uncertainty_module is not None:
                 pipeline = record['pipeline']
-                pipeline.corr_module = corr_module
-                pipeline._corr_model = corr_model
+                pipeline.set_correction(corr_module, corr_model)
 
                 dist = uncertainty_module.predict_distribution(pipeline, record['X_val'])
                 y_pred_corr = dist.get('median', y_pred_corr)
@@ -474,6 +436,7 @@ class GroupCVProtocol:
             'uncertainty': uncertainty_results,
             'corr_module': corr_module,
             'corr_model': corr_model,
+            'fold_records': fold_records,  # 用于保存模型
         }
 
 # ============================================================
@@ -599,6 +562,9 @@ class ExperimentMatrix:
                         configs: List[ExperimentConfig],
                         n_splits: int = 10,
                         stratify_labels: Optional[np.ndarray] = None,
+                        X_test: Optional[np.ndarray] = None,
+                        y_T_test: Optional[np.ndarray] = None,
+                        y_P_test: Optional[np.ndarray] = None,
                         random_seed: int = 42,
                         verbose: bool = True) -> pd.DataFrame:
         """
@@ -634,12 +600,9 @@ class ExperimentMatrix:
                 def factory(seed: Optional[int] = None):
                     seed_value = random_seed if seed is None else seed
 
+                    # 统一使用 random_seed 参数（模型内部自行转换为 sklearn 的 random_state）
                     data_params = apply_seed(cfg.data_params, ['random_seed'], seed_value)
-                    model_params = dict(cfg.model_params)
-                    if cfg.model_module_name.lower() in ['ert', 'extratrees', 'rf', 'randomforest']:
-                        model_params = apply_seed(model_params, ['random_state'], seed_value)
-                    else:
-                        model_params = apply_seed(model_params, ['random_seed'], seed_value)
+                    model_params = apply_seed(cfg.model_params, ['random_seed'], seed_value)
 
                     data_mod = get_data_module(cfg.data_module_name, **data_params)
                     model_mod = get_model_module(cfg.model_module_name, **model_params)
@@ -659,7 +622,7 @@ class ExperimentMatrix:
                 print(f"\n--- 目标: {target_name} ---")
                 
                 # 主协议
-                protocol = GroupCVProtocol(n_splits=n_splits, random_seed=random_seed)
+                protocol = StratifiedCVProtocol(n_splits=n_splits, random_seed=random_seed)
                 corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
                 results = protocol.run(
                     self.X, y, self.groups,
@@ -682,6 +645,39 @@ class ExperimentMatrix:
                     index=False
                 )
                 
+                # 保存模型参数（用于离线绘图、特征重要性等）
+                import joblib
+                models_dir = os.path.join(self.output_dir, 'models')
+                os.makedirs(models_dir, exist_ok=True)
+
+                full_pipeline = _call_pipeline_factory(pipeline_factory, random_seed)
+                full_pipeline.fit(self.X, y, self.groups, stratify_labels=stratify_labels)
+                full_pipeline.set_correction(results['corr_module'], results['corr_model'])
+
+                model_path = os.path.join(models_dir, f'{config.exp_id}_{target_name}_model.joblib')
+                joblib.dump({
+                    'model': full_pipeline.get_model(),
+                    'model_module': full_pipeline.model_module,  # 保存model_module用于特征重要性等
+                    'corr_model': results['corr_model'],
+                    'data_state': full_pipeline._state,
+                    'config': {
+                        'exp_id': config.exp_id,
+                        'data_module': config.data_module_name,
+                        'model_module': config.model_module_name,
+                        'corr_module': config.corr_module_name,
+                        'feature_set': config.feature_set,  # 新增：特征集名称，供离线绘图获取特征名
+                    },
+                }, model_path)
+
+                y_test = y_T_test if target_name == 'T' else y_P_test
+                if X_test is not None and y_test is not None:
+                    X_test_scaled, _ = full_pipeline.data_module.transform(X_test, full_pipeline._state)
+                    y_test_pred_raw = full_pipeline.predict(X_test_scaled, apply_correction=False)
+                    y_test_pred_corr = full_pipeline.corr_module.apply(full_pipeline._corr_model, y_test_pred_raw)
+                    test_metrics = compute_all_metrics(y_test, y_test_pred_corr, y_test_pred_raw)
+                    for k, v in test_metrics.items():
+                        exp_result[f'{target_name}_test_{k}'] = v
+                
                 # 汇总到结果
                 for k, v in results['summary'].items():
                     exp_result[f'{target_name}_{k}'] = v
@@ -703,10 +699,14 @@ class ExperimentMatrix:
         
         # 汇总 DataFrame
         summary_df = pd.DataFrame(all_results)
-        summary_df.to_csv(
-            os.path.join(self.output_dir, 'metrics_summary.csv'),
-            index=False
-        )
+        summary_path = os.path.join(self.output_dir, 'metrics_summary.csv')
+        if os.path.exists(summary_path):
+            existing = pd.read_csv(summary_path)
+            combined = pd.concat([existing, summary_df], ignore_index=True)
+            combined = combined.drop_duplicates(subset=['exp_id'], keep='last')
+            combined.to_csv(summary_path, index=False)
+        else:
+            summary_df.to_csv(summary_path, index=False)
         
         return summary_df
     
@@ -720,6 +720,7 @@ class ExperimentMatrix:
                               n_splits: int = 10,
                               test_size: float = 0.3,
                               n_repeats: int = 1000,
+                              checkpoint_interval: int = 100,
                               random_seed: int = 0,
                               verbose: bool = True) -> pd.DataFrame:
         from .data_modules import get_data_module
@@ -748,12 +749,9 @@ class ExperimentMatrix:
                 def factory(seed: Optional[int] = None):
                     seed_value = random_seed if seed is None else seed
 
+                    # 统一使用 random_seed 参数（模型内部自行转换为 sklearn 的 random_state）
                     data_params = apply_seed(cfg.data_params, ['random_seed'], seed_value)
-                    model_params = dict(cfg.model_params)
-                    if cfg.model_module_name.lower() in ['ert', 'extratrees', 'rf', 'randomforest']:
-                        model_params = apply_seed(model_params, ['random_state'], seed_value)
-                    else:
-                        model_params = apply_seed(model_params, ['random_seed'], seed_value)
+                    model_params = apply_seed(cfg.model_params, ['random_seed'], seed_value)
 
                     data_mod = get_data_module(cfg.data_module_name, **data_params)
                     model_mod = get_model_module(cfg.model_module_name, **model_params)
@@ -781,7 +779,7 @@ class ExperimentMatrix:
                     groups_train = self.groups[train_idx]
                     stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
 
-                    protocol = GroupCVProtocol(n_splits=n_splits, random_seed=seed)
+                    protocol = StratifiedCVProtocol(n_splits=n_splits, random_seed=seed)
                     cv_results = protocol.run(
                         X_train,
                         y_train,
@@ -796,8 +794,7 @@ class ExperimentMatrix:
 
                     pipeline = pipeline_factory(seed)
                     pipeline.fit(X_train, y_train, groups_train, stratify_labels=stratify_train)
-                    pipeline.corr_module = corr_module
-                    pipeline._corr_model = corr_model
+                    pipeline.set_correction(corr_module, corr_model)
 
                     X_test_scaled, _ = pipeline.data_module.transform(X_test, pipeline._state)
                     y_pred_raw = pipeline.predict(X_test_scaled, apply_correction=False)
@@ -809,6 +806,16 @@ class ExperimentMatrix:
 
                     if verbose and (i + 1) % 50 == 0:
                         print(f"  Repeat {i + 1}/{n_repeats}")
+                    
+                    # 分批保存 checkpoint（防止长时间运行中断丢失数据）
+                    if checkpoint_interval > 0 and (i + 1) % checkpoint_interval == 0:
+                        checkpoint_df = pd.DataFrame(repeat_metrics)
+                        checkpoint_path = os.path.join(
+                            stability_dir, f'{config.exp_id}_{target_name}_checkpoint.csv'
+                        )
+                        checkpoint_df.to_csv(checkpoint_path, index=False)
+                        if verbose:
+                            print(f"  Checkpoint saved at repeat {i+1} -> {checkpoint_path}")
 
                 repeat_df = pd.DataFrame(repeat_metrics)
                 repeat_df.to_csv(

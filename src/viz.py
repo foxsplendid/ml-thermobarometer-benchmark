@@ -1,18 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-机器学习温压计评估协议 - 可视化模块
-Viz Module: 散点图、残差图、实验对比图
+可视化模块 - 散点图、残差图、实验对比图
 """
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Optional, Dict, List, Tuple, Any
-
-# 中文支持
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
+from typing import Optional, Dict, List, Tuple
 
 
 # ============================================================
@@ -67,8 +62,8 @@ def plot_pred_vs_true(y_true: np.ndarray, y_pred: np.ndarray,
     margin = (lims[1] - lims[0]) * 0.05
     lims = [lims[0] - margin, lims[1] + margin]
     ax.plot(lims, lims, 'r--', linewidth=1.5, label='1:1 线')
-    ax.set_xlim(lims)
-    ax.set_ylim(lims)
+    ax.set_xlim((float(lims[0]), float(lims[1])))
+    ax.set_ylim((float(lims[0]), float(lims[1])))
 
     # 标签和标题
     ax.set_xlabel(f'{target_name} 真实值 ({unit})')
@@ -192,7 +187,7 @@ def plot_fold_comparison(metrics_df: pd.DataFrame,
     bars = ax.bar(x, y, edgecolor='black', alpha=0.8)
 
     # 添加均值线
-    mean_val = np.mean(y)
+    mean_val = float(np.mean(y))
     ax.axhline(y=mean_val, color='r', linestyle='--', linewidth=1.5, label=f'均值 = {mean_val:.4f}')
 
     ax.set_xlabel('Fold')
@@ -451,7 +446,7 @@ def plot_correction_effect(preds_df: pd.DataFrame,
     return fig
 
 
-def plot_feature_importance(model,
+def plot_feature_importance(importances_or_model,
                            feature_names: List[str],
                            target: str = 'T',
                            top_n: int = 20,
@@ -460,12 +455,10 @@ def plot_feature_importance(model,
     """
     特征重要性图（论文图3-3）
 
-    使用 CatBoost 的 get_feature_importance() 获取特征重要性
-
     Parameters
     ----------
-    model : CatBoostRegressor
-        训练好的 CatBoost 模型
+    importances_or_model : np.ndarray or model
+        特征重要性数组，或具有 get_feature_importance() 方法的模型
     feature_names : List[str]
         特征名称列表
     target : str
@@ -478,14 +471,21 @@ def plot_feature_importance(model,
         图形大小
     """
     # 获取特征重要性
-    try:
-        importances = model.get_feature_importance()
-    except AttributeError:
-        # 如果是封装器，访问内部模型
-        if hasattr(model, '_model'):
-            importances = model._model.get_feature_importance()
-        else:
-            raise ValueError("模型不支持 get_feature_importance() 方法")
+    if isinstance(importances_or_model, np.ndarray):
+        importances = importances_or_model
+    else:
+        # 尝试从模型获取
+        model = importances_or_model
+        try:
+            importances = model.get_feature_importance()
+        except AttributeError:
+            # 如果是封装器，访问内部模型
+            if hasattr(model, '_model'):
+                importances = model._model.get_feature_importance()
+            elif hasattr(model, 'feature_importances_'):
+                importances = model.feature_importances_
+            else:
+                raise ValueError("模型不支持 get_feature_importance() 方法")
 
     # 创建 DataFrame 排序
     importance_df = pd.DataFrame({
@@ -516,7 +516,7 @@ def plot_feature_importance(model,
 
 
 def plot_residual_distribution_comparison(results_dict: Dict[str, pd.DataFrame],
-                                          exp_names: List[str] = ['exp4_aug_corr', 'exp5_stacking'],
+                                          exp_names: Optional[List[str]] = None,
                                           target: str = 'T',
                                           save_path: Optional[str] = None,
                                           figsize: Tuple[int, int] = (10, 6)):
@@ -538,6 +538,9 @@ def plot_residual_distribution_comparison(results_dict: Dict[str, pd.DataFrame],
     figsize : tuple
         图形大小
     """
+    if exp_names is None:
+        exp_names = ['exp4_aug_corr', 'exp5_stacking']
+
     unit = '℃' if target == 'T' else 'kbar'
 
     fig, ax = plt.subplots(figsize=figsize)
@@ -570,7 +573,7 @@ def plot_residual_distribution_comparison(results_dict: Dict[str, pd.DataFrame],
             ax.plot(x_range, kde(x_range), color=colors[i], linewidth=2, alpha=0.8)
 
             # 均值线
-            mean_resid = np.mean(residuals)
+            mean_resid = float(np.mean(residuals))
             ax.axvline(mean_resid, color=colors[i], linestyle='--', linewidth=1.5, alpha=0.7)
 
     ax.set_xlabel(f'残差 ({unit})', fontsize=12)
