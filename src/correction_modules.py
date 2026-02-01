@@ -172,13 +172,29 @@ class ResidualRegressionCorrector(CorrectionModule):
 
 class SegmentedLinearCorrector(CorrectionModule):
     """
-    Piecewise linear correction with optional clipping to train range.
+    分段线性校正器
+
+    策略：
+    1. 根据预测值分位数将数据划分为多个区段
+    2. 每个区段独立拟合线性回归（y_true ~ y_pred）
+    3. 应用时根据预测值所在区段选择对应模型
+    4. 可选：将校正结果裁剪到训练集目标值范围内
     """
 
     def __init__(self,
                  n_segments: int = 3,
                  quantiles: Optional[list] = None,
                  clip_to_train_range: bool = True):
+        """
+        Parameters
+        ----------
+        n_segments : int
+            分段数量
+        quantiles : list, optional
+            分段分位数边界，默认 [1/3, 2/3]（三段）
+        clip_to_train_range : bool
+            是否将校正结果裁剪到训练集目标值范围
+        """
         self.n_segments = n_segments
         self.quantiles = quantiles or [1/3, 2/3]
         self.clip_to_train_range = clip_to_train_range
@@ -295,42 +311,3 @@ def get_correction_module(name: str, **kwargs) -> CorrectionModule:
     
     return modules[name_lower](**kwargs)
 
-# ============================================================
-# 模块测试
-# ============================================================
-
-if __name__ == "__main__":
-    print("=== 校正模块测试 ===\n")
-    
-    # 生成测试数据（模拟有系统性偏差的预测）
-    np.random.seed(42)
-    n_samples = 100
-    y_true = np.linspace(800, 1400, n_samples) + np.random.randn(n_samples) * 20
-    # 模拟预测：有系统性低估（斜率 < 1）
-    y_pred = y_true * 0.85 + 150 + np.random.randn(n_samples) * 15
-    
-    # 划分训练/验证
-    train_idx = np.arange(80)
-    val_idx = np.arange(80, 100)
-    
-    y_true_train, y_true_val = y_true[train_idx], y_true[val_idx]
-    y_pred_train, y_pred_val = y_pred[train_idx], y_pred[val_idx]
-    
-    # 测试各模块
-    for name in ['none', 'residual']:
-        print(f"--- {name.upper()} ---")
-        module = get_correction_module(name)
-        
-        corr_model = module.fit(y_true_train, y_pred_train)
-        y_corr = module.apply(corr_model, y_pred_val)
-        
-        # 计算校正前后的指标
-        rmse_before = np.sqrt(np.mean((y_true_val - y_pred_val) ** 2))
-        rmse_after = np.sqrt(np.mean((y_true_val - y_corr) ** 2))
-        
-        print(f"RMSE 校正前: {rmse_before:.2f}")
-        print(f"RMSE 校正后: {rmse_after:.2f}")
-        print(f"参数: {module.get_correction_params(corr_model)}")
-        print()
-    
-    print("✅ 所有校正模块测试通过！")

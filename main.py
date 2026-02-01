@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Chapter 3 Benchmark Protocol - 主入口
-Main Entry Point: 一键运行实验矩阵
 
 使用方法：
     python main.py          # 运行完整实验矩阵
@@ -17,8 +16,8 @@ Main Entry Point: 一键运行实验矩阵
 
 注意：
     - 绘图功能请使用 tools/plot_offline_figures.py
-    - 稳定性测试请使用 tools/run_stability_mc.py
-    - MC不确定性测试请使用 tools/run_stability_mc.py
+    - 稳定性测试请使用 tools/run_stability.py
+    - MC不确定性测试请使用 tools/run_mc_uncertainty.py
 """
 
 import os
@@ -27,7 +26,10 @@ import warnings
 import numpy as np
 import pandas as pd
 
-warnings.filterwarnings('ignore')
+# 仅过滤常见的无害警告，保留关键警告类别
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', message='.*divide by zero.*')
 
 # 确保项目根目录在路径中
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -36,41 +38,11 @@ if PROJECT_ROOT not in sys.path:
 
 
 # ============================================================
-# 配置
+# 配置（从 config.py 集中管理）
 # ============================================================
+from config import get_config_dict
 
-CONFIG = {
-    # 数据配置
-    'data_path': os.path.join(PROJECT_ROOT, 'input.csv'),
-    'data_encoding': 'latin-1',
-
-    # 特征集配置（新增：支持NoLiquid和Liquid两种特征集）
-    'feature_sets': {
-        'NoLiquid': [
-            # CPX 主要氧化物（9个）
-            'SiO2.cpx', 'TiO2.cpx', 'Al2O3.cpx', 'Cr2O3.cpx',
-            'FeO.cpx', 'MgO.cpx', 'MnO.cpx', 'CaO.cpx', 'Na2O.cpx'
-        ],
-        'Liquid': [
-            # CPX 主要氧化物（9个）
-            'SiO2.cpx', 'TiO2.cpx', 'Al2O3.cpx', 'Cr2O3.cpx',
-            'FeO.cpx', 'MgO.cpx', 'MnO.cpx', 'CaO.cpx', 'Na2O.cpx',
-            # LIQ 氧化物（9个）
-            'SiO2.liq', 'TiO2.liq', 'Al2O3.liq', 'FeO.liq',
-            'MgO.liq', 'MnO.liq', 'CaO.liq', 'Na2O.liq', 'K2O.liq'
-        ],
-    },
-    'target_T': 'T',
-    'target_P': 'P',
-    'group_col': 'Ref',
-
-    # CV 配置
-    'n_splits': 10,
-    'random_seed': 42,
-
-    # 输出配置
-    'output_dir': os.path.join(PROJECT_ROOT, 'results'),
-}
+CONFIG = get_config_dict()
 
 
 # ============================================================
@@ -86,35 +58,50 @@ def get_experiment_configs():
     - M2: ert / catboost / stacking
     - M3: none / segmented
     - 特征集: NoLiquid / Liquid
+
+    设计原则（V5更新）：
+    - E01-E03: Raw 基线组（M1=Raw, M3=None）
+    - E04-E06: Balanced 对比组（M1=Balanced, M3=None）
+    - E07-E09: Augmented + M2 对比组（M1=Augmented, M3=None）- 完整的模型对比
+    - E10-E12: Augmented + M3 对比组（M1=Augmented, M3=Segmented）- 验证校正无收益
+
+    控制变量原则：在评估 M2/M3 时，固定使用最佳 M1 配置（Augmented）
     """
     from src.protocol import ExperimentConfig
 
     # 定义12个基础配置（所有实验均不启用不确定性和随机划分，这些功能在tools中运行）
     base_configs = [
-        # E01: Raw + ERT + None
+        # === E01-E03: Raw 基线组 ===
+        # E01: Raw + ERT + None（基线）
         {'data': 'raw', 'model': 'ert', 'corr': 'none'},
-        # E02: Raw + CatBoost + None
+        # E02: Raw + CatBoost + None（基线）
         {'data': 'raw', 'model': 'catboost', 'corr': 'none'},
-        # E03: Raw + Stacking + None
+        # E03: Raw + Stacking + None（基线）
         {'data': 'raw', 'model': 'stacking', 'corr': 'none'},
+
+        # === E04-E06: Balanced 对比组（传统数据平衡方法）===
         # E04: Balanced + ERT + None
         {'data': 'balanced', 'model': 'ert', 'corr': 'none'},
         # E05: Balanced + CatBoost + None
         {'data': 'balanced', 'model': 'catboost', 'corr': 'none'},
         # E06: Balanced + Stacking + None
         {'data': 'balanced', 'model': 'stacking', 'corr': 'none'},
-        # E07: Augmented + ERT + None
+
+        # === E07-E09: Augmented + M2 对比组（完整的模型对比）===
+        # E07: Augmented + ERT + None（最佳配置 ⭐）
         {'data': 'augmented', 'model': 'ert', 'corr': 'none'},
         # E08: Augmented + CatBoost + None
         {'data': 'augmented', 'model': 'catboost', 'corr': 'none'},
-        # E09: Raw + CatBoost + Segmented
-        {'data': 'raw', 'model': 'catboost', 'corr': 'segmented'},
-        # E10: Balanced + ERT + Segmented
-        {'data': 'balanced', 'model': 'ert', 'corr': 'segmented'},
-        # E11: Balanced + CatBoost + Segmented (主力配置)
-        {'data': 'balanced', 'model': 'catboost', 'corr': 'segmented'},
-        # E12: Balanced + Stacking + Segmented
-        {'data': 'balanced', 'model': 'stacking', 'corr': 'segmented'},
+        # E09: Augmented + Stacking + None（V5新增：补全M2对比）
+        {'data': 'augmented', 'model': 'stacking', 'corr': 'none'},
+
+        # === E10-E12: Augmented + M3 对比组（验证校正无收益）===
+        # E10: Augmented + ERT + Segmented
+        {'data': 'augmented', 'model': 'ert', 'corr': 'segmented'},
+        # E11: Augmented + CatBoost + Segmented
+        {'data': 'augmented', 'model': 'catboost', 'corr': 'segmented'},
+        # E12: Augmented + Stacking + Segmented
+        {'data': 'augmented', 'model': 'stacking', 'corr': 'segmented'},
     ]
 
     # 为每个配置生成NoLiquid和Liquid两个版本
@@ -189,7 +176,7 @@ def load_data(config, feature_set='Liquid'):
 
 
 # ============================================================
-# Split preparation
+# 数据划分
 # ============================================================
 
 def prepare_splits(X, y_T, y_P, groups, config):
@@ -326,6 +313,7 @@ def main():
         'random_seed': CONFIG['random_seed'],
         'test_split': split_info,
         'feature_sets': list(CONFIG['feature_sets'].keys()),
+        'n_features_by_feature_set': {k: len(v) for k, v in CONFIG['feature_sets'].items()},
     })
 
     # 7. 打印汇总

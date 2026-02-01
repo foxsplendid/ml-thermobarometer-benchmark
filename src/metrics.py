@@ -282,32 +282,3 @@ def compare_experiments(results_list: List[Dict[str, float]]) -> pd.DataFrame:
 
     return df[available_cols]
 
-
-# ============================================================
-# 使用示例
-# ============================================================
-
-if __name__ == "__main__":
-    print("=== 指标计算示例 ===")
-
-    # 模拟数据
-    np.random.seed(42)
-    y_true = np.random.uniform(800, 1200, 100)
-    y_pred = y_true + np.random.normal(0, 30, 100)
-
-    # 计算指标
-    metrics = compute_metrics(y_true, y_pred, prefix='T_')
-    print("\n单目标指标:")
-    for k, v in metrics.items():
-        print(f"  {k}: {v:.4f}")
-
-    # 模拟多折结果
-    fold_metrics = [
-        {'fold_id': i, 'T_rmse': 25 + np.random.randn() * 5, 'T_r2': 0.92 + np.random.randn() * 0.02}
-        for i in range(5)
-    ]
-
-    summary = summarize_folds(fold_metrics)
-    print("\n折叠汇总:")
-    for k, v in summary.items():
-        print(f"  {k}: {v:.4f}")

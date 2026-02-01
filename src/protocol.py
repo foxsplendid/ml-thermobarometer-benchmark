@@ -5,6 +5,7 @@
 
 import os
 import time
+import logging
 import yaml
 import numpy as np
 import pandas as pd
@@ -16,10 +17,38 @@ from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from .interfaces import DataModule, ModelModule, CorrectionModule, UncertaintyModule, DataModuleState
 from .metrics import summarize_folds
 
+# 获取日志器
+logger = logging.getLogger(__name__)
+
 
 # ============================================================
 # 辅助函数
 # ============================================================
+
+def _apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str, Any]:
+    """
+    为参数字典注入随机种子（模块级函数，避免重复定义）
+
+    Parameters
+    ----------
+    params : Dict[str, Any]
+        原始参数字典
+    keys : List[str]
+        要注入的键名列表
+    seed : int
+        随机种子值
+
+    Returns
+    -------
+    Dict[str, Any]
+        更新后的参数字典（不修改原字典）
+    """
+    updated = dict(params)
+    for key in keys:
+        if key not in updated:
+            updated[key] = seed
+    return updated
+
 
 def _call_pipeline_factory(factory: Callable, seed: int) -> 'Pipeline':
     """安全调用pipeline factory"""
@@ -249,6 +278,41 @@ def compute_all_metrics(y_true: np.ndarray,
     
     return metrics
 
+
+# 分层 CV 辅助函数
+
+def _merge_sparse_bins(labels: np.ndarray, min_samples_per_bin: int) -> np.ndarray:
+    """合并稀疏 bins，确保每个 bin 有足够样本数"""
+    unique_bins, bin_counts = np.unique(labels, return_counts=True)
+    merged = labels.copy()
+
+    sparse_bins = unique_bins[bin_counts < min_samples_per_bin]
+    if sparse_bins.size == 0:
+        return merged
+
+    non_sparse_bins = unique_bins[bin_counts >= min_samples_per_bin]
+    if non_sparse_bins.size == 0:
+        return np.zeros_like(labels)
+
+    for sparse_bin in sparse_bins:
+        distances = np.abs(non_sparse_bins - sparse_bin)
+        nearest_bin = non_sparse_bins[np.argmin(distances)]
+        merged[labels == sparse_bin] = nearest_bin
+
+    return merged
+
+
+def _get_effective_n_splits(labels: Optional[np.ndarray], requested: int, n_samples: int) -> int:
+    """计算 CV 的有效折数（确保每折有足够样本）"""
+    if n_samples <= 1:
+        return 2
+    if labels is None:
+        return max(2, min(requested, n_samples))
+    _, bin_counts = np.unique(labels, return_counts=True)
+    min_bin = int(bin_counts.min()) if bin_counts.size > 0 else 1
+    effective = min(requested, min_bin, n_samples)
+    return max(2, effective)
+
 # summarize_folds 已移至 metrics.py，通过顶部导入使用
 
 # ============================================================
@@ -311,6 +375,10 @@ class StratifiedCVProtocol:
         # 使用StratifiedKFold（不再使用GroupKFold）
         # 注意：移除Ref分组约束，优先保证P-T分布平衡
         if stratify_labels is None:
+            logger.warning(
+                "stratify_labels=None: 使用普通 KFold 而非 StratifiedKFold，"
+                "可能导致 CV 折间分布不平衡"
+            )
             splitter = KFold(
                 n_splits=self.n_splits,
                 shuffle=True,
@@ -589,20 +657,13 @@ class ExperimentMatrix:
             print(f"{'='*60}")
             
             # 创建 pipeline 工厂
-            def apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str, Any]:
-                updated = dict(params)
-                for key in keys:
-                    if key not in updated:
-                        updated[key] = seed
-                return updated
-
             def make_pipeline_factory(cfg):
                 def factory(seed: Optional[int] = None):
                     seed_value = random_seed if seed is None else seed
 
                     # 统一使用 random_seed 参数（模型内部自行转换为 sklearn 的 random_state）
-                    data_params = apply_seed(cfg.data_params, ['random_seed'], seed_value)
-                    model_params = apply_seed(cfg.model_params, ['random_seed'], seed_value)
+                    data_params = _apply_seed(cfg.data_params, ['random_seed'], seed_value)
+                    model_params = _apply_seed(cfg.model_params, ['random_seed'], seed_value)
 
                     data_mod = get_data_module(cfg.data_module_name, **data_params)
                     model_mod = get_model_module(cfg.model_module_name, **model_params)
@@ -616,7 +677,13 @@ class ExperimentMatrix:
             unc_module = MCUncertaintyEstimator(random_seed=random_seed) if config.run_uncertainty else None
             
             # 运行两个目标（T 和 P）
-            exp_result = {'exp_id': config.exp_id}
+            exp_result = {
+                'exp_id': config.exp_id,
+                'feature_set': config.feature_set,
+                'data_module': config.data_module_name,
+                'model_module': config.model_module_name,
+                'corr_module': config.corr_module_name,
+            }
             
             for target_name, y in [('T', self.y_T), ('P', self.y_P)]:
                 print(f"\n--- 目标: {target_name} ---")
@@ -722,6 +789,11 @@ class ExperimentMatrix:
                               n_repeats: int = 1000,
                               checkpoint_interval: int = 100,
                               random_seed: int = 0,
+                              resume: bool = False,
+                              repeat_start: int = 0,
+                              repeat_end: Optional[int] = None,
+                              segment_tag: Optional[str] = None,
+                              write_summary: bool = True,
                               verbose: bool = True) -> pd.DataFrame:
         from .data_modules import get_data_module
         from .model_modules import get_model_module
@@ -729,6 +801,13 @@ class ExperimentMatrix:
 
         stability_dir = os.path.join(self.output_dir, 'stability')
         os.makedirs(stability_dir, exist_ok=True)
+
+        if repeat_end is None:
+            repeat_end = repeat_start + n_repeats - 1
+        if repeat_start < 0 or repeat_end < repeat_start:
+            raise ValueError("repeat_end must be >= repeat_start")
+
+        segment_suffix = f"_{segment_tag}" if segment_tag else ""
 
         summary_rows = []
 
@@ -738,20 +817,13 @@ class ExperimentMatrix:
             print(f"Config: {config.data_module_name} + {config.model_module_name} + {config.corr_module_name}")
             print(f"{'='*60}")
 
-            def apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str, Any]:
-                updated = dict(params)
-                for key in keys:
-                    if key not in updated:
-                        updated[key] = seed
-                return updated
-
             def make_pipeline_factory(cfg):
                 def factory(seed: Optional[int] = None):
                     seed_value = random_seed if seed is None else seed
 
                     # 统一使用 random_seed 参数（模型内部自行转换为 sklearn 的 random_state）
-                    data_params = apply_seed(cfg.data_params, ['random_seed'], seed_value)
-                    model_params = apply_seed(cfg.model_params, ['random_seed'], seed_value)
+                    data_params = _apply_seed(cfg.data_params, ['random_seed'], seed_value)
+                    model_params = _apply_seed(cfg.model_params, ['random_seed'], seed_value)
 
                     data_mod = get_data_module(cfg.data_module_name, **data_params)
                     model_mod = get_model_module(cfg.model_module_name, **model_params)
@@ -765,21 +837,75 @@ class ExperimentMatrix:
             for target_name, y_full, y_test in [('T', self.y_T, y_T_test), ('P', self.y_P, y_P_test)]:
                 repeat_metrics = []
                 idx_all = np.arange(len(self.X))
-
-                for i in range(n_repeats):
+            
+                test_metrics_path = os.path.join(
+                    stability_dir, f'{config.exp_id}_{target_name}_test_metrics{segment_suffix}.csv'
+                )
+            
+                start_repeat = repeat_start
+                if resume:
+                    import re
+                    latest_path = None
+                    if os.path.exists(test_metrics_path):
+                        latest_path = test_metrics_path
+                    else:
+                        pattern = re.compile(
+                            rf"{re.escape(config.exp_id)}_{target_name}_checkpoint{re.escape(segment_suffix)}_(\d+)\.csv"
+                        )
+                        checkpoints = []
+                        for fname in os.listdir(stability_dir):
+                            m = pattern.match(fname)
+                            if m:
+                                checkpoints.append((int(m.group(1)), fname))
+                        if checkpoints:
+                            checkpoints.sort()
+                            latest_path = os.path.join(stability_dir, checkpoints[-1][1])
+            
+                    if latest_path is not None:
+                        existing_df = pd.read_csv(latest_path)
+                        if not existing_df.empty:
+                            if 'repeat_id' in existing_df.columns:
+                                existing_df = existing_df.drop_duplicates(subset=['repeat_id'])
+                                existing_df = existing_df[
+                                    (existing_df["repeat_id"] >= repeat_start) &
+                                    (existing_df["repeat_id"] <= repeat_end)
+                                ]
+                                if not existing_df.empty:
+                                    start_repeat = int(existing_df["repeat_id"].max()) + 1
+                                else:
+                                    start_repeat = repeat_start
+                            else:
+                                start_repeat = repeat_start + int(len(existing_df))
+                            repeat_metrics = existing_df.to_dict("records")
+                            if verbose:
+                                print(f"  Resume {target_name}: start from repeat {start_repeat}")
+            
+                total_repeats = repeat_end - repeat_start + 1
+                if start_repeat > repeat_end and verbose:
+                    print(f"  Resume {target_name}: segment already complete")
+            
+                for i in range(start_repeat, repeat_end + 1):
                     seed = random_seed + i
                     train_idx, _ = train_test_split(
                         idx_all,
                         test_size=test_size,
                         random_state=seed
                     )
-
+            
                     X_train = self.X[train_idx]
                     y_train = y_full[train_idx]
                     groups_train = self.groups[train_idx]
-                    stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
-
-                    protocol = StratifiedCVProtocol(n_splits=n_splits, random_seed=seed)
+                    if stratify_labels is not None:
+                        stratify_raw = stratify_labels[train_idx]
+                        merged_labels = _merge_sparse_bins(stratify_raw, min_samples_per_bin=n_splits)
+                        stratify_train = merged_labels
+                    else:
+                        merged_labels = None
+                        stratify_train = None
+            
+                    effective_n_splits = _get_effective_n_splits(merged_labels, n_splits, len(X_train))
+            
+                    protocol = StratifiedCVProtocol(n_splits=effective_n_splits, random_seed=seed)
                     cv_results = protocol.run(
                         X_train,
                         y_train,
@@ -787,89 +913,113 @@ class ExperimentMatrix:
                         pipeline_factory,
                         uncertainty_module=None,
                         corr_module=corr_module,
-                        stratify_labels=stratify_train,
+                        stratify_labels=merged_labels,
                         verbose=False
                     )
-                    corr_model = cv_results['corr_model']
-
+                    corr_model = cv_results["corr_model"]
+            
                     pipeline = pipeline_factory(seed)
                     pipeline.fit(X_train, y_train, groups_train, stratify_labels=stratify_train)
                     pipeline.set_correction(corr_module, corr_model)
-
+            
                     X_test_scaled, _ = pipeline.data_module.transform(X_test, pipeline._state)
                     y_pred_raw = pipeline.predict(X_test_scaled, apply_correction=False)
                     y_pred_corr = corr_module.apply(corr_model, y_pred_raw)
-
+            
                     metrics = compute_all_metrics(y_test, y_pred_corr, y_pred_raw)
-                    metrics['repeat_id'] = i
+                    metrics["repeat_id"] = i
                     repeat_metrics.append(metrics)
-
-                    if verbose and (i + 1) % 50 == 0:
-                        print(f"  Repeat {i + 1}/{n_repeats}")
-                    
-                    # 分批保存 checkpoint（防止长时间运行中断丢失数据）
-                    if checkpoint_interval > 0 and (i + 1) % checkpoint_interval == 0:
+            
+                    current_idx = i - repeat_start + 1
+                    if verbose and (current_idx % 50) == 0:
+                        print(f"  Repeat {current_idx}/{total_repeats}")
+            
+                    if checkpoint_interval > 0 and (current_idx % checkpoint_interval) == 0:
                         checkpoint_df = pd.DataFrame(repeat_metrics)
                         checkpoint_path = os.path.join(
-                            stability_dir, f'{config.exp_id}_{target_name}_checkpoint.csv'
+                            stability_dir, f'{config.exp_id}_{target_name}_checkpoint{segment_suffix}_{i+1}.csv'
                         )
                         checkpoint_df.to_csv(checkpoint_path, index=False)
                         if verbose:
                             print(f"  Checkpoint saved at repeat {i+1} -> {checkpoint_path}")
-
+            
                 repeat_df = pd.DataFrame(repeat_metrics)
-                repeat_df.to_csv(
-                    os.path.join(stability_dir, f'{config.exp_id}_{target_name}_test_metrics.csv'),
-                    index=False
-                )
+                repeat_df.to_csv(test_metrics_path, index=False)
+            
+                if write_summary:
+                    summary = summarize_folds(repeat_metrics, compute_ci=True)
+                    summary_row = {"exp_id": config.exp_id, "target": target_name}
+                    summary_row.update(summary)
+                    summary_rows.append(summary_row)
+        if write_summary:
+            summary_df = pd.DataFrame(summary_rows)
+            summary_df.to_csv(
+                os.path.join(stability_dir, 'stability_summary.csv'),
+                index=False
+            )
+            return summary_df
 
-                summary = summarize_folds(repeat_metrics, compute_ci=True)
-                summary_row = {'exp_id': config.exp_id, 'target': target_name}
-                summary_row.update(summary)
-                summary_rows.append(summary_row)
-
-        summary_df = pd.DataFrame(summary_rows)
-        summary_df.to_csv(
-            os.path.join(stability_dir, 'stability_summary.csv'),
-            index=False
-        )
-
-        return summary_df
+        return pd.DataFrame()
     def compute_effect_table(self, summary_df: pd.DataFrame) -> pd.DataFrame:
         """
-        计算模块效应表
-        
-        比较不同配置相对于基线的改进
+        Compute effect table relative to a baseline within each feature_set.
         """
-        # 找到基线（通常是第一个实验）
-        baseline = summary_df.iloc[0]
-        
+        def select_baseline(df: pd.DataFrame) -> pd.Series:
+            if {'data_module', 'model_module', 'corr_module'}.issubset(df.columns):
+                mask = (
+                    (df['data_module'] == 'raw') &
+                    (df['model_module'] == 'ert') &
+                    (df['corr_module'] == 'none')
+                )
+                if mask.any():
+                    return df[mask].iloc[0]
+            return df.sort_values('exp_id').iloc[0]
+
         effects = []
-        for _, row in summary_df.iterrows():
-            effect = {'exp_id': row['exp_id']}
-            
-            for target in ['T', 'P']:
-                # RMSE 改进（负值表示改进）
-                if f'{target}_rmse_mean' in row and f'{target}_rmse_mean' in baseline:
-                    effect[f'{target}_delta_rmse'] = row[f'{target}_rmse_mean'] - baseline[f'{target}_rmse_mean']
-                    effect[f'{target}_pct_rmse'] = (effect[f'{target}_delta_rmse'] / baseline[f'{target}_rmse_mean']) * 100
-                
-                # MBE 改进
-                if f'{target}_mbe_mean' in row:
-                    effect[f'{target}_delta_mbe'] = abs(row[f'{target}_mbe_mean']) - abs(baseline.get(f'{target}_mbe_mean', 0))
-            
-            effects.append(effect)
-        
+        if 'feature_set' in summary_df.columns:
+            grouped = summary_df.groupby('feature_set', dropna=False)
+        else:
+            grouped = [(None, summary_df)]
+
+        for feature_set, df in grouped:
+            if df.empty:
+                continue
+            baseline = select_baseline(df)
+            for _, row in df.iterrows():
+                effect = {'exp_id': row['exp_id']}
+                if feature_set is not None:
+                    effect['feature_set'] = feature_set
+
+                for target in ['T', 'P']:
+                    if f'{target}_rmse_mean' in row and f'{target}_rmse_mean' in baseline:
+                        effect[f'{target}_delta_rmse'] = row[f'{target}_rmse_mean'] - baseline[f'{target}_rmse_mean']
+                        effect[f'{target}_pct_rmse'] = (
+                            effect[f'{target}_delta_rmse'] / baseline[f'{target}_rmse_mean']
+                        ) * 100
+                    if f'{target}_mbe_mean' in row:
+                        effect[f'{target}_delta_mbe'] = abs(row[f'{target}_mbe_mean']) - abs(
+                            baseline.get(f'{target}_mbe_mean', 0)
+                        )
+
+                effects.append(effect)
+
         effect_df = pd.DataFrame(effects)
         effect_df.to_csv(
             os.path.join(self.output_dir, 'effect_table.csv'),
             index=False
         )
-        
+
         return effect_df
-    
+
     def save_config(self, configs: List[ExperimentConfig], extra_info: Dict = None):
-        """保存实验配置"""
+        """保存实验配置（含版本信息用于结果追溯）"""
+        # 尝试导入版本信息函数
+        try:
+            from config import get_version_info
+            version_info = get_version_info()
+        except ImportError:
+            version_info = {'note': 'version info unavailable'}
+
         config_data = {
             'experiments': [
                 {
@@ -887,9 +1037,17 @@ class ExperimentMatrix:
                 'n_samples': len(self.X),
                 'n_features': self.X.shape[1],
                 'n_groups': len(np.unique(self.groups)),
-            }
+            },
+            'version_info': version_info,
         }
         
+        n_features_by_feature_set = None
+        if extra_info and 'n_features_by_feature_set' in extra_info:
+            n_features_by_feature_set = extra_info.pop('n_features_by_feature_set')
+
+        if n_features_by_feature_set is not None:
+            config_data['data_shape']['n_features_by_feature_set'] = n_features_by_feature_set
+
         if extra_info:
             config_data.update(extra_info)
         

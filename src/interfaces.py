@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 """
 统一接口定义 - DataModule, ModelModule, CorrectionModule, UncertaintyModule
+
+本模块定义了 M1-M4 各模块的抽象基类，确保所有实现遵循统一契约。
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import numpy as np
+
+# 避免循环导入
+if TYPE_CHECKING:
+    from .protocol import Pipeline
 
 
 # ============================================================
@@ -30,8 +36,25 @@ class DataModule(ABC):
     """
     M1 数据模块抽象基类
     
-    职责：数据标准化、分布处理、输出样本权重
-    约束：fit_transform() 仅训练折调用，transform() 仅验证折调用
+    职责：
+    - 数据标准化（Z-score normalization）
+    - 分布处理（平衡/增强）
+    - 输出样本权重
+
+    约束：
+    - fit_transform() 仅在训练折调用
+    - transform() 仅在验证/测试折调用
+    - 所有拟合参数通过 DataModuleState 传递
+
+    数据契约：
+    - 输入 X: shape (n_samples, n_features), dtype=float64
+      - 单位: wt%（氧化物质量百分比）
+      - 范围: 通常 0-100，但可能有负值（测量误差）
+    - 输入 y: shape (n_samples,)
+      - 温度 T: 单位 °C，范围约 700-1500
+      - 压力 P: 单位 kbar，范围约 0-25
+    - 输出 X: 标准化后，均值≈0，标准差≈1
+    - 输出 sample_weights: 非负，总和≈n_samples
     """
     
     @abstractmethod
@@ -346,14 +369,3 @@ class UncertaintyModule(ABC):
         return self.__class__.__name__
 
 
-# ============================================================
-# Pipeline 类型定义（前向声明）
-# ============================================================
-
-class Pipeline:
-    """
-    完整预测管道（封装 DataModule + ModelModule + CorrectionModule）
-    
-    此处仅作类型提示，完整实现在 protocol.py 中
-    """
-    pass

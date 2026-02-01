@@ -26,12 +26,37 @@ def _get_default_n_jobs() -> int:
     return -1
 
 
-def _detect_catboost_gpu() -> Dict[str, Any]:
-    """检测CatBoost GPU可用性"""
+def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> Dict[str, Any]:
+    """
+    根据配置获取 CatBoost 的 task_type 参数
+
+    Parameters
+    ----------
+    task_type : str
+        'auto' - 自动检测 GPU，有则用 GPU，无则用 CPU
+        'CPU' - 强制使用 CPU
+        'GPU' - 强制使用 GPU
+    gpu_devices : str
+        GPU 设备 ID
+
+    Returns
+    -------
+    Dict[str, Any]
+        CatBoost 的 task_type 和 devices 参数
+    """
+    task_type_upper = task_type.upper().strip()
+
+    if task_type_upper == 'CPU':
+        return {}  # CatBoost 默认使用 CPU
+
+    if task_type_upper == 'GPU':
+        return {'task_type': 'GPU', 'devices': gpu_devices}
+
+    # auto: 自动检测
     try:
         from catboost.utils import get_gpu_device_count
         if get_gpu_device_count() >= 1:
-            return {'task_type': 'GPU', 'devices': '0'}
+            return {'task_type': 'GPU', 'devices': gpu_devices}
     except Exception:
         pass
     return {}
@@ -104,25 +129,53 @@ class CatBoostModel(ModelModule):
     - Boosting 方法，偏差校正能力强
     - 支持类别特征（本项目不使用）
     - 内置正则化，抗过拟合
+
+    GPU 控制（通过 config.py 集中配置）：
+    - 'auto': 自动检测 GPU，有则用，无则用 CPU
+    - 'CPU': 强制使用 CPU
+    - 'GPU': 强制使用 GPU
     """
     
     def __init__(self,
-                 iterations: int = 1000,
-                 depth: int = 6,
-                 learning_rate: float = 0.03,
-                 loss_function: str = 'RMSE',
+                 iterations: Optional[int] = None,
+                 depth: Optional[int] = None,
+                 learning_rate: Optional[float] = None,
+                 loss_function: Optional[str] = None,
                  random_seed: int = 42,
                  silent: bool = True,
                  task_type: Optional[str] = None,
-                 gpu_devices: str = '0',
+                 gpu_devices: Optional[str] = None,
                  **kwargs):
-        # GPU 自动检测
-        gpu_params = {}
-        if task_type is None:
-            gpu_params = _detect_catboost_gpu()
-        elif task_type.upper() == 'GPU':
-            gpu_params = {'task_type': 'GPU', 'devices': gpu_devices}
-        
+        # 从集中配置获取默认值
+        try:
+            from config import CONFIG as APP_CONFIG
+            cb_cfg = APP_CONFIG.model.catboost
+            default_iterations = cb_cfg.iterations
+            default_depth = cb_cfg.depth
+            default_learning_rate = cb_cfg.learning_rate
+            default_loss_function = cb_cfg.loss_function
+            default_task_type = cb_cfg.task_type
+            default_gpu_devices = cb_cfg.gpu_devices
+        except ImportError:
+            # 如果无法导入配置，使用硬编码默认值
+            default_iterations = 1000
+            default_depth = 6
+            default_learning_rate = 0.03
+            default_loss_function = 'RMSE'
+            default_task_type = 'auto'
+            default_gpu_devices = '0'
+
+        # 使用传入参数或配置默认值
+        iterations = iterations if iterations is not None else default_iterations
+        depth = depth if depth is not None else default_depth
+        learning_rate = learning_rate if learning_rate is not None else default_learning_rate
+        loss_function = loss_function if loss_function is not None else default_loss_function
+        task_type = task_type if task_type is not None else default_task_type
+        gpu_devices = gpu_devices if gpu_devices is not None else default_gpu_devices
+
+        # GPU 配置
+        gpu_params = _get_catboost_task_type(task_type, gpu_devices)
+
         self.params = {
             'iterations': iterations,
             'depth': depth,
@@ -130,6 +183,7 @@ class CatBoostModel(ModelModule):
             'loss_function': loss_function,
             'random_seed': random_seed,
             'verbose': False if silent else 100,
+            'allow_writing_files': False,
             **gpu_params,
             **kwargs
         }
@@ -545,44 +599,3 @@ def get_model_module(name: str, **kwargs) -> ModelModule:
     
     return modules[name_lower](**kwargs)
 
-
-# ============================================================
-# 模块测试
-# ============================================================
-
-if __name__ == "__main__":
-    print("=== 模型模块测试 ===\n")
-    
-    # 生成测试数据
-    np.random.seed(42)
-    n_samples = 200
-    n_features = 10
-    X = np.random.randn(n_samples, n_features)
-    y = np.sum(X[:, :3], axis=1) + np.random.randn(n_samples) * 0.5
-    
-    # 划分训练/验证
-    train_idx = np.arange(160)
-    val_idx = np.arange(160, 200)
-    
-    X_train, X_val = X[train_idx], X[val_idx]
-    y_train, y_val = y[train_idx], y[val_idx]
-    groups_train = np.random.choice(['A', 'B', 'C'], len(train_idx))
-    
-    # 测试各模型
-    for name in ['ert', 'catboost', 'stacking']:
-        print(f"--- {name.upper()} ---")
-        module = get_model_module(name)
-        
-        model = module.fit(X_train, y_train, groups=groups_train)
-        y_pred = module.predict(model, X_val)
-        
-        rmse = np.sqrt(np.mean((y_val - y_pred) ** 2))
-        print(f"RMSE: {rmse:.4f}")
-        print(f"训练时间: {module.get_training_time():.2f}s")
-        
-        if name == 'stacking':
-            corr = module.get_base_correlations()
-            print(f"基模型相关性矩阵:\n{corr}")
-        print()
-    
-    print("✅ 所有模型模块测试通过！")

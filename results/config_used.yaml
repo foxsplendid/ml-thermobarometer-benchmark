@@ -115,60 +115,60 @@ experiments:
   exp_id: E08_catboost_augmented_none_liq
   model_module: catboost
   model_params: {}
-- corr_module: segmented
+- corr_module: none
   corr_params: {}
-  data_module: raw
+  data_module: augmented
   data_params: {}
-  exp_id: E09_catboost_raw_segmented_noliq
-  model_module: catboost
+  exp_id: E09_stacking_augmented_none_noliq
+  model_module: stacking
   model_params: {}
-- corr_module: segmented
+- corr_module: none
   corr_params: {}
-  data_module: raw
+  data_module: augmented
   data_params: {}
-  exp_id: E09_catboost_raw_segmented_liq
-  model_module: catboost
-  model_params: {}
-- corr_module: segmented
-  corr_params: {}
-  data_module: balanced
-  data_params: {}
-  exp_id: E10_ert_balanced_segmented_noliq
-  model_module: ert
-  model_params: {}
-- corr_module: segmented
-  corr_params: {}
-  data_module: balanced
-  data_params: {}
-  exp_id: E10_ert_balanced_segmented_liq
-  model_module: ert
-  model_params: {}
-- corr_module: segmented
-  corr_params: {}
-  data_module: balanced
-  data_params: {}
-  exp_id: E11_catboost_balanced_segmented_noliq
-  model_module: catboost
-  model_params: {}
-- corr_module: segmented
-  corr_params: {}
-  data_module: balanced
-  data_params: {}
-  exp_id: E11_catboost_balanced_segmented_liq
-  model_module: catboost
-  model_params: {}
-- corr_module: segmented
-  corr_params: {}
-  data_module: balanced
-  data_params: {}
-  exp_id: E12_stacking_balanced_segmented_noliq
+  exp_id: E09_stacking_augmented_none_liq
   model_module: stacking
   model_params: {}
 - corr_module: segmented
   corr_params: {}
-  data_module: balanced
+  data_module: augmented
   data_params: {}
-  exp_id: E12_stacking_balanced_segmented_liq
+  exp_id: E10_ert_augmented_segmented_noliq
+  model_module: ert
+  model_params: {}
+- corr_module: segmented
+  corr_params: {}
+  data_module: augmented
+  data_params: {}
+  exp_id: E10_ert_augmented_segmented_liq
+  model_module: ert
+  model_params: {}
+- corr_module: segmented
+  corr_params: {}
+  data_module: augmented
+  data_params: {}
+  exp_id: E11_catboost_augmented_segmented_noliq
+  model_module: catboost
+  model_params: {}
+- corr_module: segmented
+  corr_params: {}
+  data_module: augmented
+  data_params: {}
+  exp_id: E11_catboost_augmented_segmented_liq
+  model_module: catboost
+  model_params: {}
+- corr_module: segmented
+  corr_params: {}
+  data_module: augmented
+  data_params: {}
+  exp_id: E12_stacking_augmented_segmented_noliq
+  model_module: stacking
+  model_params: {}
+- corr_module: segmented
+  corr_params: {}
+  data_module: augmented
+  data_params: {}
+  exp_id: E12_stacking_augmented_segmented_liq
   model_module: stacking
   model_params: {}
 feature_sets:
