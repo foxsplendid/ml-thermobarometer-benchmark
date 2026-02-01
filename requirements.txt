@@ -16,3 +16,11 @@ pyarrow>=6.0
 
 # Config
 pyyaml>=5.4
+
+# Testing (development)
+pytest>=7.0
+pytest-cov>=4.0
+
+# Note: 为确保可复现性，建议在生产环境中生成并使用 requirements-lock.txt
+# pip freeze > requirements-lock.txt
+

@@ -1,13 +1,32 @@
 # -*- coding: utf-8 -*-
 """
 可视化模块 - 散点图、残差图、实验对比图
+
+注意：本模块需要 matplotlib 和 seaborn，如未安装将无法使用绑图功能
 """
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from typing import Optional, Dict, List, Tuple
+
+# 可视化库导入保护
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    HAS_PLOTTING = True
+except ImportError:
+    HAS_PLOTTING = False
+    plt = None
+    sns = None
+
+
+def _check_plotting_available():
+    """检查绑图库是否可用"""
+    if not HAS_PLOTTING:
+        raise ImportError(
+            "可视化功能需要 matplotlib 和 seaborn，"
+            "请运行: pip install matplotlib seaborn"
+        )
 
 
 # ============================================================
@@ -45,6 +64,8 @@ def plot_pred_vs_true(y_true: np.ndarray, y_pred: np.ndarray,
     alpha : float
         透明度
     """
+    _check_plotting_available()
+
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
 
@@ -61,25 +82,25 @@ def plot_pred_vs_true(y_true: np.ndarray, y_pred: np.ndarray,
     ]
     margin = (lims[1] - lims[0]) * 0.05
     lims = [lims[0] - margin, lims[1] + margin]
-    ax.plot(lims, lims, 'r--', linewidth=1.5, label='1:1 线')
+    ax.plot(lims, lims, 'r--', linewidth=1.5, label='1:1 line')
     ax.set_xlim((float(lims[0]), float(lims[1])))
     ax.set_ylim((float(lims[0]), float(lims[1])))
 
     # 标签和标题
-    ax.set_xlabel(f'{target_name} 真实值 ({unit})')
-    ax.set_ylabel(f'{target_name} 预测值 ({unit})')
+    ax.set_xlabel(f'{target_name} True ({unit})')
+    ax.set_ylabel(f'{target_name} Predicted ({unit})')
 
     if title:
         ax.set_title(title)
     else:
-        ax.set_title(f'{target_name} 预测 vs 真实')
+        ax.set_title(f'{target_name} Predicted vs True')
 
     # 添加指标
     if show_metrics:
         from .metrics import rmse, r2
         rmse_val = rmse(y_true, y_pred)
         r2_val = r2(y_true, y_pred)
-        text = f'RMSE = {rmse_val:.2f} {unit}\nR² = {r2_val:.4f}'
+        text = f'RMSE = {rmse_val:.2f} {unit}\nR$^2$ = {r2_val:.4f}'
         ax.text(0.05, 0.95, text, transform=ax.transAxes, fontsize=10,
                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -131,14 +152,14 @@ def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray,
     # 残差 vs 预测值
     ax1.scatter(y_pred, residuals, alpha=0.5, s=15, edgecolors='none')
     ax1.axhline(y=0, color='r', linestyle='--', linewidth=1.5)
-    ax1.set_xlabel(f'{target_name} 预测值 ({unit})')
-    ax1.set_ylabel(f'残差 ({unit})')
-    ax1.set_title(f'{target_name} 残差分布')
+    ax1.set_xlabel(f'{target_name} Predicted ({unit})')
+    ax1.set_ylabel(f'Residual ({unit})')
+    ax1.set_title(f'{target_name} Residual Distribution')
 
     # 添加残差统计
     mean_res = np.mean(residuals)
     std_res = np.std(residuals)
-    text = f'均值 = {mean_res:.2f}\n标准差 = {std_res:.2f}'
+    text = f'Mean = {mean_res:.2f}\nStd = {std_res:.2f}'
     ax1.text(0.95, 0.95, text, transform=ax1.transAxes, fontsize=9,
              verticalalignment='top', horizontalalignment='right',
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -147,9 +168,9 @@ def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray,
     if ax2 is not None:
         ax2.hist(residuals, bins=30, edgecolor='black', alpha=0.7)
         ax2.axvline(x=0, color='r', linestyle='--', linewidth=1.5)
-        ax2.set_xlabel(f'残差 ({unit})')
-        ax2.set_ylabel('频数')
-        ax2.set_title(f'{target_name} 残差直方图')
+        ax2.set_xlabel(f'Residual ({unit})')
+        ax2.set_ylabel('Frequency')
+        ax2.set_title(f'{target_name} Residual Histogram')
 
     plt.tight_layout()
     return ax1
@@ -188,48 +209,13 @@ def plot_fold_comparison(metrics_df: pd.DataFrame,
 
     # 添加均值线
     mean_val = float(np.mean(y))
-    ax.axhline(y=mean_val, color='r', linestyle='--', linewidth=1.5, label=f'均值 = {mean_val:.4f}')
+    ax.axhline(y=mean_val, color='r', linestyle='--', linewidth=1.5, label=f'Mean = {mean_val:.4f}')
 
     ax.set_xlabel('Fold')
     ax.set_ylabel(f'{metric.upper()}')
-    ax.set_title(f'{target} - {metric.upper()} 各折对比')
+    ax.set_title(f'{target} - {metric.upper()} Fold Comparison')
     ax.set_xticks(x)
     ax.legend()
-
-    plt.tight_layout()
-    return fig
-
-
-def plot_experiment_summary(results_df: pd.DataFrame,
-                            figsize: Tuple[int, int] = (10, 6)) -> plt.Figure:
-    """
-    实验汇总热力图
-
-    Parameters
-    ----------
-    results_df : pd.DataFrame
-        实验汇总结果，必须包含 exp_name 列
-    """
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
-
-    # 选择要显示的指标
-    metrics_T = ['T_rmse_mean', 'T_mae_mean', 'T_r2_mean']
-    metrics_P = ['P_rmse_mean', 'P_mae_mean', 'P_r2_mean']
-
-    for ax, metrics, target in [(axes[0], metrics_T, 'T'), (axes[1], metrics_P, 'P')]:
-        available_metrics = [m for m in metrics if m in results_df.columns]
-        if not available_metrics:
-            continue
-
-        data = results_df[['exp_name'] + available_metrics].set_index('exp_name')
-
-        # 简化列名
-        data.columns = [c.replace(f'{target}_', '').replace('_mean', '') for c in data.columns]
-
-        sns.heatmap(data, annot=True, fmt='.3f', cmap='RdYlGn_r', ax=ax,
-                    cbar_kws={'label': '指标值'})
-        ax.set_title(f'{target} 指标汇总')
-        ax.set_ylabel('实验')
 
     plt.tight_layout()
     return fig
@@ -263,7 +249,7 @@ def plot_full_report(y_T_true: np.ndarray, y_T_pred: np.ndarray,
     plot_residuals(y_P_true, y_P_pred, target_name='P', unit='kbar', ax=axes[1, 1], show_hist=False)
 
     if exp_name:
-        fig.suptitle(f'实验报告: {exp_name}', fontsize=14, fontweight='bold', y=1.02)
+        fig.suptitle(f'Experiment Report: {exp_name}', fontsize=14, fontweight='bold', y=1.02)
 
     plt.tight_layout()
     return fig
@@ -280,73 +266,6 @@ def save_figure(fig: plt.Figure, filepath: str, dpi: int = 150) -> None:
 # 四个核心可视化函数（论文级）
 # ============================================================
 
-def plot_stepwise_rmse_comparison(results_dict: Dict[str, pd.DataFrame],
-                                   target: str = 'T',
-                                   save_path: Optional[str] = None,
-                                   figsize: Tuple[int, int] = (10, 6)):
-    """
-    阶梯误差对比图（论文图3-1）
-
-    展示 Exp1→Exp5 的 RMSE 递减趋势，标注模块贡献
-
-    Parameters
-    ----------
-    results_dict : Dict[str, pd.DataFrame]
-        实验结果字典 {exp_name: metrics_df}
-    target : str
-        目标名称（'T' 或 'P'）
-    save_path : str, optional
-        保存路径
-    figsize : tuple
-        图形大小
-    """
-    # 获取各实验的 RMSE 均值和标准差
-    exp_names = ['exp1_baseline', 'exp2_aug_only', 'exp3_corr_only', 'exp4_aug_corr', 'exp5_stacking']
-    exp_labels = ['Exp1\n基线', 'Exp2\n增强', 'Exp3\n校正', 'Exp4\n增强+校正', 'Exp5\nStacking']
-
-    rmse_means = []
-    rmse_stds = []
-
-    for exp_name in exp_names:
-        if exp_name in results_dict:
-            df = results_dict[exp_name]
-            col_name = f'{target}_rmse' if f'{target}_rmse' in df.columns else f'rmse_{target}'
-            rmse_means.append(df[col_name].mean())
-            rmse_stds.append(df[col_name].std())
-        else:
-            rmse_means.append(np.nan)
-            rmse_stds.append(np.nan)
-
-    # 创建图表
-    fig, ax = plt.subplots(figsize=figsize)
-
-    x_pos = np.arange(len(exp_names))
-    bars = ax.bar(x_pos, rmse_means, yerr=rmse_stds,
-                  capsize=5, alpha=0.7,
-                  color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'])
-
-    # 标注相对 Exp1 的提升百分比
-    baseline_rmse = rmse_means[0]
-    for i, (mean_val, bar) in enumerate(zip(rmse_means, bars)):
-        if i > 0 and not np.isnan(mean_val):
-            improvement = (baseline_rmse - mean_val) / baseline_rmse * 100
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + rmse_stds[i] + 0.5,
-                   f'{improvement:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
-
-    ax.set_xlabel('实验配置', fontsize=12)
-    ax.set_ylabel(f'RMSE ({"℃" if target == "T" else "kbar"})', fontsize=12)
-    ax.set_title(f'{"温度" if target == "T" else "压力"}预测性能对比（论文图3-1）', fontsize=14, fontweight='bold')
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(exp_labels)
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"图表已保存: {save_path}")
-
-    return fig
 
 
 def plot_correction_effect(preds_df: pd.DataFrame,
@@ -391,23 +310,23 @@ def plot_correction_effect(preds_df: pd.DataFrame,
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
 
     # 左图：校正前
-    ax1.scatter(y_true, y_pred_raw, alpha=0.4, s=15, label='预测值')
+    ax1.scatter(y_true, y_pred_raw, alpha=0.4, s=15, label='Predicted')
     lims = [min(y_true.min(), y_pred_raw.min()), max(y_true.max(), y_pred_raw.max())]
     margin = (lims[1] - lims[0]) * 0.05
     lims = [lims[0] - margin, lims[1] + margin]
 
-    ax1.plot(lims, lims, 'r--', linewidth=2, label='1:1 线')
+    ax1.plot(lims, lims, 'r--', linewidth=2, label='1:1 line')
 
     # 实际回归线
     x_fit = np.array(lims)
     y_fit = slope_raw * x_fit + intercept_raw
-    ax1.plot(x_fit, y_fit, 'b-', linewidth=2, alpha=0.7, label='实际回归线')
+    ax1.plot(x_fit, y_fit, 'b-', linewidth=2, alpha=0.7, label='Regression line')
 
     ax1.set_xlim(lims)
     ax1.set_ylim(lims)
-    ax1.set_xlabel(f'{target} 真实值 ({unit})', fontsize=11)
-    ax1.set_ylabel(f'{target} 预测值 ({unit})', fontsize=11)
-    ax1.set_title(f'校正前（{exp_name}）', fontsize=12, fontweight='bold')
+    ax1.set_xlabel(f'{target} True ({unit})', fontsize=11)
+    ax1.set_ylabel(f'{target} Predicted ({unit})', fontsize=11)
+    ax1.set_title(f'Before Correction ({exp_name})', fontsize=12, fontweight='bold')
     ax1.legend(loc='upper left')
     ax1.set_aspect('equal')
 
@@ -418,17 +337,17 @@ def plot_correction_effect(preds_df: pd.DataFrame,
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
     # 右图：校正后
-    ax2.scatter(y_true, y_pred_corr, alpha=0.4, s=15, color='green', label='校正预测值')
-    ax2.plot(lims, lims, 'r--', linewidth=2, label='1:1 线')
+    ax2.scatter(y_true, y_pred_corr, alpha=0.4, s=15, color='green', label='Corrected')
+    ax2.plot(lims, lims, 'r--', linewidth=2, label='1:1 line')
 
     y_fit_corr = slope_corr * x_fit + intercept_corr
-    ax2.plot(x_fit, y_fit_corr, 'g-', linewidth=2, alpha=0.7, label='实际回归线')
+    ax2.plot(x_fit, y_fit_corr, 'g-', linewidth=2, alpha=0.7, label='Regression line')
 
     ax2.set_xlim(lims)
     ax2.set_ylim(lims)
-    ax2.set_xlabel(f'{target} 真实值 ({unit})', fontsize=11)
-    ax2.set_ylabel(f'{target} 预测值 ({unit})', fontsize=11)
-    ax2.set_title(f'校正后（{exp_name}）', fontsize=12, fontweight='bold')
+    ax2.set_xlabel(f'{target} True ({unit})', fontsize=11)
+    ax2.set_ylabel(f'{target} Predicted ({unit})', fontsize=11)
+    ax2.set_title(f'After Correction ({exp_name})', fontsize=12, fontweight='bold')
     ax2.legend(loc='upper left')
     ax2.set_aspect('equal')
 
@@ -501,8 +420,8 @@ def plot_feature_importance(importances_or_model,
     ax.set_yticks(y_pos)
     ax.set_yticklabels(importance_df['feature'].values)
     ax.invert_yaxis()  # 最重要的在顶部
-    ax.set_xlabel('重要性', fontsize=12)
-    ax.set_title(f'{"温度" if target == "T" else "压力"}预测 Top {top_n} 特征重要性',
+    ax.set_xlabel('Importance', fontsize=12)
+    ax.set_title(f'{"Temperature" if target == "T" else "Pressure"} Prediction Top {top_n} Feature Importance',
                 fontsize=14, fontweight='bold')
     ax.grid(axis='x', alpha=0.3, linestyle='--')
 
@@ -547,8 +466,8 @@ def plot_residual_distribution_comparison(results_dict: Dict[str, pd.DataFrame],
 
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
     labels_map = {
-        'exp4_aug_corr': 'Exp4 (CatBoost + 增强 + 校正)',
-        'exp5_stacking': 'Exp5 (Stacking + 增强 + 校正)'
+        'exp4_aug_corr': 'Exp4 (CatBoost + Augmented + Correction)',
+        'exp5_stacking': 'Exp5 (Stacking + Augmented + Correction)'
     }
 
     for i, exp_name in enumerate(exp_names):
@@ -576,12 +495,426 @@ def plot_residual_distribution_comparison(results_dict: Dict[str, pd.DataFrame],
             mean_resid = float(np.mean(residuals))
             ax.axvline(mean_resid, color=colors[i], linestyle='--', linewidth=1.5, alpha=0.7)
 
-    ax.set_xlabel(f'残差 ({unit})', fontsize=12)
-    ax.set_ylabel('密度', fontsize=12)
-    ax.set_title(f'{"温度" if target == "T" else "压力"}预测残差分布对比', fontsize=14, fontweight='bold')
+    ax.set_xlabel(f'Residual ({unit})', fontsize=12)
+    ax.set_ylabel('Density', fontsize=12)
+    ax.set_title(f'{"Temperature" if target == "T" else "Pressure"} Prediction Residual Distribution Comparison', fontsize=14, fontweight='bold')
     ax.legend(loc='upper right')
     ax.grid(axis='y', alpha=0.3, linestyle='--')
-    ax.axvline(0, color='red', linestyle=':', linewidth=2, label='零残差')
+    ax.axvline(0, color='red', linestyle=':', linewidth=2, label='Zero residual')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"图表已保存: {save_path}")
+
+    return fig
+
+
+# ============================================================
+# 论文图件函数（V5.1 新增）
+# ============================================================
+
+def plot_pt_grid_cv_splits(y_t: np.ndarray,
+                           y_p: np.ndarray,
+                           tp_bins: np.ndarray,
+                           fold_assignments: np.ndarray,
+                           p_edges: np.ndarray,
+                           t_edges: np.ndarray,
+                           save_path: Optional[str] = None,
+                           figsize: Tuple[int, int] = (10, 8)) -> plt.Figure:
+    """
+    图 3-2：P-T 空间网格分层 CV 示意图
+
+    展示 P-T 散点图，点按 fold 上色，背景叠加网格 bins
+
+    Parameters
+    ----------
+    y_t : np.ndarray
+        温度真实值
+    y_p : np.ndarray
+        压力真实值
+    tp_bins : np.ndarray
+        P-T bin 标签
+    fold_assignments : np.ndarray
+        每个样本的 fold ID (0-9)
+    p_edges : np.ndarray
+        压力 bin 边界
+    t_edges : np.ndarray
+        温度 bin 边界
+    save_path : str, optional
+        保存路径
+    figsize : tuple
+        图形大小
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # 绘制网格背景
+    for p_edge in p_edges:
+        ax.axhline(y=p_edge, color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
+    for t_edge in t_edges:
+        ax.axvline(x=t_edge, color='gray', linestyle='-', linewidth=0.5, alpha=0.3)
+
+    # 按 fold 上色绘制散点
+    n_folds = len(np.unique(fold_assignments))
+    cmap = plt.cm.get_cmap('tab10', n_folds)
+
+    for fold_id in range(n_folds):
+        mask = fold_assignments == fold_id
+        ax.scatter(y_t[mask], y_p[mask], c=[cmap(fold_id)], s=15, alpha=0.6,
+                   label=f'Fold {fold_id}', edgecolors='none')
+
+    ax.set_xlabel('Temperature T (°C)', fontsize=12)
+    ax.set_ylabel('Pressure P (kbar)', fontsize=12)
+    ax.set_title('P-T Grid Stratified Cross-Validation', fontsize=14, fontweight='bold')
+
+    # 紧凑图例（左上角）
+    ax.legend(loc='upper left', fontsize=8, ncol=2, markerscale=1.5)
+    ax.grid(False)
+
+    # 设置坐标范围
+    ax.set_xlim(t_edges.min() - 10, t_edges.max() + 10)
+    ax.set_ylim(p_edges.min() - 0.5, p_edges.max() + 0.5)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"图表已保存: {save_path}")
+
+    return fig
+
+
+def plot_feature_set_comparison_boxplot(metrics_df: pd.DataFrame,
+                                        target: str = 'T',
+                                        metric: str = 'rmse',
+                                        save_path: Optional[str] = None,
+                                        figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
+    """
+    图 3-3：特征集效能对比箱线图
+
+    对比 NoLiquid vs Liquid 的 RMSE 分布
+
+    Parameters
+    ----------
+    metrics_df : pd.DataFrame
+        汇总指标数据框，需包含 exp_id 列（用于识别特征集）
+    target : str
+        目标名称（'T' 或 'P'）
+    metric : str
+        指标名称（'rmse', 'mae', 'r2'）
+    save_path : str, optional
+        保存路径
+    figsize : tuple
+        图形大小
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # 从 exp_id 或 exp_name 提取特征集标识
+    id_col = 'exp_id' if 'exp_id' in metrics_df.columns else 'exp_name'
+    metric_col = f'{target}_{metric}_mean' if f'{target}_{metric}_mean' in metrics_df.columns else f'{target}_{metric}'
+
+    if metric_col not in metrics_df.columns:
+        print(f"警告: 列 {metric_col} 不存在")
+        return fig
+
+    df = metrics_df.copy()
+    df['feature_set'] = df[id_col].apply(lambda x: 'NoLiquid' if '_noliq' in str(x) else 'Liquid')
+
+    # 分组数据
+    noliq_data = df[df['feature_set'] == 'NoLiquid'][metric_col].dropna().values
+    liq_data = df[df['feature_set'] == 'Liquid'][metric_col].dropna().values
+
+    # 箱线图
+    box_data = [noliq_data, liq_data]
+    positions = [1, 2]
+    bp = ax.boxplot(box_data, positions=positions, widths=0.6, patch_artist=True)
+
+    # 颜色
+    colors_box = ['#ff7f0e', '#1f77b4']
+    for patch, color in zip(bp['boxes'], colors_box):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+
+    # 添加散点
+    for i, (data, pos) in enumerate(zip(box_data, positions)):
+        jitter = np.random.uniform(-0.15, 0.15, len(data))
+        ax.scatter(pos + jitter, data, alpha=0.4, s=20, color=colors_box[i], edgecolors='none')
+
+    # 标注均值
+    for i, (data, pos) in enumerate(zip(box_data, positions)):
+        mean_val = np.mean(data)
+        std_val = np.std(data)
+        ax.text(pos, ax.get_ylim()[1] * 0.95, f'{mean_val:.1f}±{std_val:.1f}',
+                ha='center', va='top', fontsize=10, fontweight='bold')
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(['NoLiquid\n(9 features)', 'Liquid\n(18 features)'])
+    unit = '°C' if target == 'T' else 'kbar'
+    ax.set_ylabel(f'{metric.upper()} ({unit})', fontsize=12)
+    ax.set_title(f'{"Temperature" if target == "T" else "Pressure"} Prediction - Feature Set Comparison', fontsize=14, fontweight='bold')
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"图表已保存: {save_path}")
+
+    return fig
+
+
+def plot_parity_comparison(preds_noliq: Dict[str, np.ndarray],
+                           preds_liq: Dict[str, np.ndarray],
+                           target: str = 'T',
+                           save_path: Optional[str] = None,
+                           figsize: Tuple[int, int] = (12, 5)) -> plt.Figure:
+    """
+    图 3-4：最佳模型 1:1 预测对比图（NoLiquid vs Liquid 并排）
+
+    Parameters
+    ----------
+    preds_noliq : dict
+        NoLiquid 预测结果，需包含 'y_true', 'y_pred' 键
+    preds_liq : dict
+        Liquid 预测结果，需包含 'y_true', 'y_pred' 键
+    target : str
+        目标名称（'T' 或 'P'）
+    save_path : str, optional
+        保存路径
+    figsize : tuple
+        图形大小
+    """
+    from .metrics import rmse, r2
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    unit = '°C' if target == 'T' else 'kbar'
+
+    # 计算共用坐标范围
+    all_values = np.concatenate([
+        preds_noliq['y_true'], preds_noliq['y_pred'],
+        preds_liq['y_true'], preds_liq['y_pred']
+    ])
+    lims = [all_values.min(), all_values.max()]
+    margin = (lims[1] - lims[0]) * 0.05
+    lims = [lims[0] - margin, lims[1] + margin]
+
+    # 左图：NoLiquid
+    ax1.scatter(preds_noliq['y_true'], preds_noliq['y_pred'], alpha=0.4, s=15, color='#ff7f0e', edgecolors='none')
+    ax1.plot(lims, lims, 'r--', linewidth=2, label='1:1 line')
+    ax1.set_xlim(lims)
+    ax1.set_ylim(lims)
+    ax1.set_xlabel(f'{target} True ({unit})', fontsize=11)
+    ax1.set_ylabel(f'{target} Predicted ({unit})', fontsize=11)
+    ax1.set_title(f'NoLiquid (9 features)', fontsize=12, fontweight='bold')
+    ax1.set_aspect('equal')
+    rmse_noliq = rmse(preds_noliq['y_true'], preds_noliq['y_pred'])
+    r2_noliq = r2(preds_noliq['y_true'], preds_noliq['y_pred'])
+    ax1.text(0.05, 0.95, f'RMSE = {rmse_noliq:.1f} {unit}\nR² = {r2_noliq:.3f}',
+             transform=ax1.transAxes, fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    ax1.legend(loc='lower right')
+
+    # 右图：Liquid
+    ax2.scatter(preds_liq['y_true'], preds_liq['y_pred'], alpha=0.4, s=15, color='#1f77b4', edgecolors='none')
+    ax2.plot(lims, lims, 'r--', linewidth=2, label='1:1 line')
+    ax2.set_xlim(lims)
+    ax2.set_ylim(lims)
+    ax2.set_xlabel(f'{target} True ({unit})', fontsize=11)
+    ax2.set_ylabel(f'{target} Predicted ({unit})', fontsize=11)
+    ax2.set_title(f'Liquid (18 features)', fontsize=12, fontweight='bold')
+    ax2.set_aspect('equal')
+    rmse_liq = rmse(preds_liq['y_true'], preds_liq['y_pred'])
+    r2_liq = r2(preds_liq['y_true'], preds_liq['y_pred'])
+    ax2.text(0.05, 0.95, f'RMSE = {rmse_liq:.1f} {unit}\nR² = {r2_liq:.3f}',
+             transform=ax2.transAxes, fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+    ax2.legend(loc='lower right')
+
+    # 总标题
+    fig.suptitle(f'{"Temperature" if target == "T" else "Pressure"} Prediction - Feature Set Comparison (1:1 Plot)', fontsize=14, fontweight='bold', y=1.02)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"图表已保存: {save_path}")
+
+    return fig
+
+
+def plot_m1_ablation_stepwise(metrics_df: pd.DataFrame,
+                              target: str = 'T',
+                              model: str = 'ert',
+                              feature_set: str = 'liq',
+                              save_path: Optional[str] = None,
+                              figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
+    """
+    图 3-5：M1 消融阶梯式效能提升图（Raw → Balanced → Augmented）
+
+    固定 M2 模型和特征集，展示 M1 的独立贡献
+
+    Parameters
+    ----------
+    metrics_df : pd.DataFrame
+        汇总指标数据框
+    target : str
+        目标名称（'T' 或 'P'）
+    model : str
+        模型名称（'ert', 'catboost', 'stacking'）
+    feature_set : str
+        特征集后缀（'liq' 或 'noliq'）
+    save_path : str, optional
+        保存路径
+    figsize : tuple
+        图形大小
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # 查找对应实验
+    id_col = 'exp_id' if 'exp_id' in metrics_df.columns else 'exp_name'
+    metric_col = f'{target}_rmse_mean'
+    std_col = f'{target}_rmse_std'
+
+    # M1 处理策略顺序
+    m1_order = ['raw', 'balanced', 'augmented']
+    m1_labels = ['Raw\n(Baseline)', 'Balanced\n(Reweighted)', 'Augmented\n(Physics-based)']
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+
+    rmse_means = []
+    rmse_stds = []
+
+    for m1 in m1_order:
+        # 构建实验 ID 模式：E0X_{model}_{m1}_none_{feature_set}
+        pattern = f'_{model}_{m1}_none_{feature_set}'
+        matched = metrics_df[metrics_df[id_col].str.contains(pattern, na=False)]
+        if len(matched) > 0:
+            rmse_means.append(matched[metric_col].values[0])
+            rmse_stds.append(matched[std_col].values[0] if std_col in matched.columns else 0)
+        else:
+            rmse_means.append(np.nan)
+            rmse_stds.append(np.nan)
+
+    # 绘制柱状图
+    x_pos = np.arange(len(m1_order))
+    bars = ax.bar(x_pos, rmse_means, yerr=rmse_stds, capsize=5, alpha=0.7, color=colors)
+
+    # 标注相对基线的改善（在误差棒上方显示）
+    baseline_rmse = rmse_means[0]
+    for i, (mean_val, bar) in enumerate(zip(rmse_means, bars)):
+        if i > 0 and not np.isnan(mean_val) and not np.isnan(baseline_rmse):
+            improvement = (baseline_rmse - mean_val) / baseline_rmse * 100
+            # 在误差棒顶部上方标注
+            err_val = rmse_stds[i] if not np.isnan(rmse_stds[i]) else 0
+            y_pos = bar.get_height() + err_val + 0.3
+            ax.text(bar.get_x() + bar.get_width() / 2, y_pos,
+                    f'{improvement:+.1f}%', ha='center', va='bottom', fontsize=9, fontweight='bold',
+                    color='green' if improvement > 0 else 'red')
+
+    # 设置y轴上限，留出足够空间给标注
+    max_height = max(rmse_means) + max(rmse_stds) if rmse_stds else max(rmse_means)
+    ax.set_ylim(0, max_height * 1.2)
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(m1_labels)
+    unit = '°C' if target == 'T' else 'kbar'
+    ax.set_ylabel(f'RMSE ({unit})', fontsize=12)
+    model_name = {'ert': 'ERT', 'catboost': 'CatBoost', 'stacking': 'Stacking'}.get(model, model.upper())
+    ax.set_title(f'{"Temperature" if target == "T" else "Pressure"} Prediction - M1 Data Module Ablation ({model_name})', fontsize=14, fontweight='bold')
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"图表已保存: {save_path}")
+
+    return fig
+
+
+def plot_performance_heatmap_matrix(metrics_df: pd.DataFrame,
+                                    target: str = 'T',
+                                    feature_set: str = 'liq',
+                                    save_path: Optional[str] = None,
+                                    figsize: Tuple[int, int] = (10, 8)) -> plt.Figure:
+    """
+    图 3-6：算法×处理×校正的性能热力图
+
+    X 轴：算法（ERT/CatBoost/Stacking）
+    Y 轴：处理策略（Raw/Balanced/Augmented/Augmented+Segmented）
+
+    Parameters
+    ----------
+    metrics_df : pd.DataFrame
+        汇总指标数据框
+    target : str
+        目标名称（'T' 或 'P'）
+    feature_set : str
+        特征集后缀（'liq' 或 'noliq'）
+    save_path : str, optional
+        保存路径
+    figsize : tuple
+        图形大小
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    id_col = 'exp_id' if 'exp_id' in metrics_df.columns else 'exp_name'
+    metric_col = f'{target}_rmse_mean'
+
+    # 定义矩阵维度
+    models = ['ert', 'catboost', 'stacking']
+    model_labels = ['ERT', 'CatBoost', 'Stacking']
+
+    # 处理策略（Y轴）
+    treatments = [
+        ('raw', 'none', 'Raw'),
+        ('balanced', 'none', 'Balanced'),
+        ('augmented', 'none', 'Augmented'),
+        ('augmented', 'segmented', 'Aug+Segmented'),
+    ]
+
+    # 构建矩阵
+    matrix = np.full((len(treatments), len(models)), np.nan)
+
+    for i, (data_mod, corr_mod, _) in enumerate(treatments):
+        for j, model in enumerate(models):
+            pattern = f'_{model}_{data_mod}_{corr_mod}_{feature_set}'
+            matched = metrics_df[metrics_df[id_col].str.contains(pattern, na=False)]
+            if len(matched) > 0:
+                matrix[i, j] = matched[metric_col].values[0]
+
+    # 绘制热力图
+    im = ax.imshow(matrix, cmap='RdYlGn_r', aspect='auto')
+
+    # 添加数值标注
+    for i in range(len(treatments)):
+        for j in range(len(models)):
+            val = matrix[i, j]
+            if not np.isnan(val):
+                text_color = 'white' if val > np.nanmedian(matrix) else 'black'
+                ax.text(j, i, f'{val:.1f}', ha='center', va='center', fontsize=11, color=text_color, fontweight='bold')
+
+    # 标记最优值（如果存在有效数据）
+    if not np.all(np.isnan(matrix)):
+        min_idx = np.unravel_index(np.nanargmin(matrix), matrix.shape)
+        ax.add_patch(plt.Rectangle((min_idx[1] - 0.5, min_idx[0] - 0.5), 1, 1,
+                                    fill=False, edgecolor='gold', linewidth=3))
+
+    # 设置轴标签
+    ax.set_xticks(np.arange(len(models)))
+    ax.set_xticklabels(model_labels, fontsize=11)
+    ax.set_yticks(np.arange(len(treatments)))
+    ax.set_yticklabels([t[2] for t in treatments], fontsize=11)
+
+    ax.set_xlabel('Model (M2)', fontsize=12)
+    ax.set_ylabel('Data Processing + Correction (M1 + M3)', fontsize=12)
+
+    unit = '°C' if target == 'T' else 'kbar'
+    ax.set_title(f'{"Temperature" if target == "T" else "Pressure"} Performance Matrix - RMSE ({unit})\n(Gold box = Best config)', fontsize=14, fontweight='bold')
+
+    # 添加颜色条
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label(f'RMSE ({unit})', fontsize=11)
 
     plt.tight_layout()
 

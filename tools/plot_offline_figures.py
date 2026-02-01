@@ -23,13 +23,17 @@ from src.viz import (
     plot_pred_vs_true,
     plot_residuals,
     plot_fold_comparison,
-    plot_experiment_summary,
     plot_full_report,
-    plot_stepwise_rmse_comparison,
     plot_correction_effect,
     plot_residual_distribution_comparison,
     plot_feature_importance,
     save_figure,
+    # V5.1 新增绘图函数（论文图件）
+    plot_pt_grid_cv_splits,
+    plot_feature_set_comparison_boxplot,
+    plot_parity_comparison,
+    plot_m1_ablation_stepwise,
+    plot_performance_heatmap_matrix,
 )
 
 try:
@@ -202,14 +206,14 @@ def _plot_basic(exp_id: str, results_dir: str, fig_dir: str) -> None:
         return
 
     # Pred vs true
-    fig = plot_pred_vs_true(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="C")
+    fig = plot_pred_vs_true(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="°C")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_T_pred_vs_true.png"))
 
     fig = plot_pred_vs_true(df_P["y_true"], df_P["y_pred_corr"], target_name="P", unit="kbar")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_P_pred_vs_true.png"))
 
     # Residuals
-    fig = plot_residuals(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="C")
+    fig = plot_residuals(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="°C")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_T_residuals.png"))
 
     fig = plot_residuals(df_P["y_true"], df_P["y_pred_corr"], target_name="P", unit="kbar")
@@ -252,50 +256,28 @@ def _plot_fold(exp_id: str, results_dir: str, fig_dir: str) -> None:
         _save_any(fig, os.path.join(fig_dir, f"{exp_id}_P_fold_rmse.png"))
 
 
-def _plot_summary(results_dir: str, fig_dir: str) -> None:
+
+def _plot_stepwise(results_dir: str, fig_dir: str) -> None:
+    """绘制阶梯式效能提升图（使用新的 M1 消融函数）"""
     df = _load_metrics_summary(results_dir)
     if df is None:
         return
-    fig = plot_experiment_summary(df)
-    _save_any(fig, os.path.join(fig_dir, "experiment_summary_heatmap.png"))
 
-
-def _plot_stepwise(results_dir: str, fig_dir: str) -> None:
-    # Map expected keys to existing experiments (Liquid set)
-    step_map = {
-        "exp1_baseline": "E01_ert_raw_none_liq",
-        "exp2_aug_only": "E07_ert_augmented_none_liq",
-        "exp3_corr_only": "E09_catboost_raw_segmented_liq",
-        "exp4_aug_corr": "E11_catboost_balanced_segmented_liq",
-        "exp5_stacking": "E12_stacking_balanced_segmented_liq",
-    }
-
-    def build_dict(target: str) -> Dict[str, pd.DataFrame]:
-        out: Dict[str, pd.DataFrame] = {}
-        for key, exp_id in step_map.items():
-            df = _load_fold_metrics(results_dir, exp_id, target)
-            if df is None:
-                continue
-            df = df.rename(columns={"rmse": f"{target}_rmse"})
-            out[key] = df
-        return out
-
-    results_T = build_dict("T")
-    if results_T:
-        fig = plot_stepwise_rmse_comparison(results_T, target="T")
-        _save_any(fig, os.path.join(fig_dir, "stepwise_rmse_T.png"))
-
-    results_P = build_dict("P")
-    if results_P:
-        fig = plot_stepwise_rmse_comparison(results_P, target="P")
-        _save_any(fig, os.path.join(fig_dir, "stepwise_rmse_P.png"))
+    # 使用新的 M1 消融函数（图 3-5）
+    for target in ['T', 'P']:
+        try:
+            fig = plot_m1_ablation_stepwise(df, target=target, model='ert', feature_set='liq')
+            _save_any(fig, os.path.join(fig_dir, f"m1_ablation_{target}.png"))
+        except Exception as e:
+            print(f"skip: m1_ablation_{target} error: {e}")
 
 
 def _plot_residual_compare(results_dir: str, fig_dir: str) -> None:
-    # Use E08 vs E12 for comparison, mapped to expected keys
+    """残差分布对比图（V5 更新：对比 E07 vs E09，即 ERT vs Stacking）"""
+    # V5 更新：对比 Augmented 下的 ERT vs Stacking
     comp_map = {
-        "exp4_aug_corr": "E08_catboost_augmented_none_liq",
-        "exp5_stacking": "E12_stacking_balanced_segmented_liq",
+        "exp4_aug_corr": "E07_ert_augmented_none_liq",      # ERT（最佳配置）
+        "exp5_stacking": "E09_stacking_augmented_none_liq",  # Stacking
     }
 
     def build_dict(target: str) -> Dict[str, pd.DataFrame]:
@@ -328,22 +310,143 @@ def _plot_residual_compare(results_dir: str, fig_dir: str) -> None:
         print("skip: residual compare (P) missing data")
 
 
+def _plot_feature_set_boxplot(results_dir: str, fig_dir: str) -> None:
+    """图 3-3：特征集效能对比箱线图"""
+    df = _load_metrics_summary(results_dir)
+    if df is None:
+        return
+
+    for target in ['T', 'P']:
+        try:
+            fig = plot_feature_set_comparison_boxplot(df, target=target, metric='rmse')
+            _save_any(fig, os.path.join(fig_dir, f"feature_set_boxplot_{target}.png"))
+        except Exception as e:
+            print(f"skip: feature_set_boxplot_{target} error: {e}")
+
+
+def _plot_parity_compare(results_dir: str, fig_dir: str) -> None:
+    """图 3-4：最佳模型 1:1 预测对比图（NoLiquid vs Liquid）"""
+    # 加载 E07 的两个版本
+    for target in ['T', 'P']:
+        df_noliq = _load_predictions(results_dir, "E07_ert_augmented_none_noliq", target)
+        df_liq = _load_predictions(results_dir, "E07_ert_augmented_none_liq", target)
+
+        if df_noliq is None or df_liq is None:
+            print(f"skip: parity_compare_{target} missing data")
+            continue
+
+        preds_noliq = {'y_true': df_noliq['y_true'].values, 'y_pred': df_noliq['y_pred_corr'].values}
+        preds_liq = {'y_true': df_liq['y_true'].values, 'y_pred': df_liq['y_pred_corr'].values}
+
+        try:
+            fig = plot_parity_comparison(preds_noliq, preds_liq, target=target)
+            _save_any(fig, os.path.join(fig_dir, f"parity_compare_{target}.png"))
+        except Exception as e:
+            print(f"skip: parity_compare_{target} error: {e}")
+
+
+def _plot_heatmap_matrix(results_dir: str, fig_dir: str) -> None:
+    """图 3-6：算法×处理×校正的性能热力图"""
+    df = _load_metrics_summary(results_dir)
+    if df is None:
+        return
+
+    for target in ['T', 'P']:
+        try:
+            fig = plot_performance_heatmap_matrix(df, target=target, feature_set='liq')
+            _save_any(fig, os.path.join(fig_dir, f"performance_heatmap_{target}.png"))
+        except Exception as e:
+            print(f"skip: performance_heatmap_{target} error: {e}")
+
+
+def _merge_sparse_bins_for_cv(labels: np.ndarray, min_samples: int = 10) -> np.ndarray:
+    """合并稀疏 bins，确保每个 bin 至少有 min_samples 个样本"""
+    unique_bins, bin_counts = np.unique(labels, return_counts=True)
+    merged_labels = labels.copy()
+
+    sparse_bins = unique_bins[bin_counts < min_samples]
+    if len(sparse_bins) == 0:
+        return merged_labels
+
+    non_sparse_bins = unique_bins[bin_counts >= min_samples]
+    if len(non_sparse_bins) == 0:
+        # 所有 bin 都稀疏，合并为一个
+        return np.zeros_like(labels)
+
+    for sparse_bin in sparse_bins:
+        distances = np.abs(non_sparse_bins - sparse_bin)
+        nearest_bin = non_sparse_bins[np.argmin(distances)]
+        merged_labels[labels == sparse_bin] = nearest_bin
+
+    return merged_labels
+
+
+def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> None:
+    """图 3-2：P-T 空间网格分层 CV 示意图"""
+    try:
+        import pandas as pd
+        from sklearn.model_selection import StratifiedKFold
+        from src.splitters import compute_pt_edges, assign_pt_bins
+
+        # 加载数据
+        df = pd.read_csv(data_path, encoding='latin-1')
+        y_T = df['T'].values
+        y_P = df['P'].values
+
+        # 计算 P-T bins
+        pt_bins = compute_pt_edges(y_T, y_P)
+        tp_labels = assign_pt_bins(y_T, y_P, pt_bins)
+
+        # 合并稀疏 bins 以支持分层 CV
+        n_splits = 10
+        merged_labels = _merge_sparse_bins_for_cv(tp_labels, min_samples=n_splits)
+
+        # 检查最小 bin 样本数，必要时降级 n_splits
+        _, bin_counts = np.unique(merged_labels, return_counts=True)
+        effective_n_splits = min(n_splits, bin_counts.min())
+        effective_n_splits = max(2, effective_n_splits)
+
+        # 生成 fold 分配
+        skf = StratifiedKFold(n_splits=effective_n_splits, shuffle=True, random_state=random_seed)
+        fold_assignments = np.zeros(len(y_T), dtype=int)
+        for fold_id, (_, val_idx) in enumerate(skf.split(y_T, merged_labels)):
+            fold_assignments[val_idx] = fold_id
+
+        # 绘图（使用原始 tp_labels 显示网格，但 fold 分配基于合并后的标签）
+        fig = plot_pt_grid_cv_splits(
+            y_T, y_P, tp_labels, fold_assignments,
+            pt_bins.p_edges, pt_bins.t_edges
+        )
+        _save_any(fig, os.path.join(fig_dir, "pt_grid_cv_splits.png"))
+        if effective_n_splits < 10:
+            print(f"  注意: P-T CV 图使用 {effective_n_splits} 折（因稀疏bins降级）")
+    except Exception as e:
+        print(f"skip: pt_grid_cv_splits error: {e}")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Offline plotting smoke test.")
+    parser = argparse.ArgumentParser(description="Offline figure generation for paper.")
     parser.add_argument("--results-dir", default="results")
-    parser.add_argument("--exp-id", default="E08_catboost_augmented_none_liq")
-    parser.add_argument("--fig-subdir", default=os.path.join("figures", "plot_smoke_test"))
+    parser.add_argument("--exp-id", default="E07_ert_augmented_none_liq")
+    parser.add_argument("--fig-subdir", default="figures")
+    parser.add_argument("--data-path", default="input.csv")
     args = parser.parse_args()
 
     fig_dir = os.path.join(args.results_dir, args.fig_subdir)
     _ensure_dir(fig_dir)
 
+    # 基础绘图
     _plot_basic(args.exp_id, args.results_dir, fig_dir)
     _plot_fold(args.exp_id, args.results_dir, fig_dir)
-    _plot_summary(args.results_dir, fig_dir)
-    _plot_stepwise(args.results_dir, fig_dir)
-    _plot_residual_compare(args.results_dir, fig_dir)
     _plot_importance(args.exp_id, args.results_dir, fig_dir)
+
+    # V5.1 新增：论文图件
+    _plot_pt_grid_cv(args.data_path, fig_dir)             # 图 3-2
+    _plot_feature_set_boxplot(args.results_dir, fig_dir)  # 图 3-3
+    _plot_parity_compare(args.results_dir, fig_dir)       # 图 3-4
+    _plot_stepwise(args.results_dir, fig_dir)             # 图 3-5
+    _plot_heatmap_matrix(args.results_dir, fig_dir)       # 图 3-6
+    _plot_residual_compare(args.results_dir, fig_dir)     # 残差对比
 
     print(f"plots saved under {fig_dir}")
     return 0

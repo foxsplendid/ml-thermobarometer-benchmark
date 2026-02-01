@@ -137,16 +137,17 @@ class BalancedDataModule(DataModule):
 
 class AugmentedDataModule(DataModule):
     """
-    Augmented data module with EPMA-style perturbations.
+    数据增强模块 - 基于 EPMA 误差模型的扰动增强
 
-    Strategy:
-    1. Generate n_aug perturbations per sample.
-    2. EPMA relative error model (>1 wt%: 3%, <=1 wt%: 8%).
-    3. Use the same targets for perturbed samples.
+    策略：
+    1. 为每个样本生成 n_aug 个扰动副本
+    2. EPMA 相对误差模型：>1 wt% 使用 3% 误差，≤1 wt% 使用 8% 误差
+    3. 扰动样本与原样本使用相同目标值
 
-    Notes:
-    - Augmentation only happens within training folds.
-    - Augmented size = (1 + n_aug) * original size.
+    注意：
+    - 增强仅在训练折内进行，验证折不增强
+    - 增强后样本量 = (1 + n_aug) × 原样本量
+    - 每次调用 fit_transform 使用不同随机种子（基于调用计数器）
     """
 
     def __init__(
@@ -163,19 +164,19 @@ class AugmentedDataModule(DataModule):
         Parameters
         ----------
         n_aug : int
-            Number of augmented samples per original sample.
+            每个原始样本生成的增强副本数
         noise_level : float
-            Gaussian noise level (fallback when error_model != "epma").
+            高斯噪声水平（error_model != "epma" 时使用）
         error_model : str
-            "epma" for EPMA-style relative error, otherwise Gaussian.
+            "epma" 使用 EPMA 相对误差模型，否则使用高斯噪声
         rel_err_high : float
-            Relative error for values > error_threshold.
+            高含量（> error_threshold）的相对误差
         rel_err_low : float
-            Relative error for values <= error_threshold.
+            低含量（≤ error_threshold）的相对误差
         error_threshold : float
-            Threshold in wt% to switch relative error.
+            高/低含量切换阈值（单位：wt%）
         clip_min : float or None
-            Minimum value after perturbation; None disables clipping.
+            扰动后最小值裁剪，None 表示不裁剪
         """
         self.n_aug = n_aug
         self.noise_level = noise_level
@@ -185,6 +186,7 @@ class AugmentedDataModule(DataModule):
         self.rel_err_low = rel_err_low
         self.error_threshold = error_threshold
         self.clip_min = clip_min
+        self._fit_count = 0  # 调用计数器，用于派生不同的随机种子
 
     def _epma_perturb(self, X_raw: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
         rel_err = np.where(
@@ -212,18 +214,20 @@ class AugmentedDataModule(DataModule):
                       y_train: np.ndarray, 
                       groups_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
-        """Standardize and generate augmented samples."""
-        # 使用隔离的 RandomState，避免污染全局随机状态
-        rng = np.random.RandomState(self.random_seed)
+        """标准化并生成增强样本"""
+        # 使用调用计数器派生种子，确保每次调用使用不同的随机状态
+        effective_seed = self.random_seed + self._fit_count
+        self._fit_count += 1
+        rng = np.random.RandomState(effective_seed)
 
-        # 1. Feature std for Gaussian fallback
+        # 1. 计算特征标准差（高斯模式备用）
         feature_std = np.std(X_train, axis=0)
 
-        # 2. Fit scaler on raw data
+        # 2. 在原始数据上拟合标准化器
         scaler = StandardScaler()
         scaler.fit(X_train)
 
-        # 3. Generate augmented samples
+        # 3. 生成增强样本
         X_list = [X_train]
         y_list = [y_train]
 
@@ -235,15 +239,15 @@ class AugmentedDataModule(DataModule):
             X_list.append(X_augmented)
             y_list.append(y_train)
 
-        # 4. Merge and scale
+        # 4. 合并并标准化
         X_all = np.vstack(X_list)
         y_all = np.concatenate(y_list)
         X_scaled = scaler.transform(X_all)
 
-        # 5. Uniform sample weights
+        # 5. 样本权重（均匀）
         sample_weights = np.ones(len(y_all), dtype=np.float64)
 
-        # 6. Save state
+        # 6. 保存状态
         state = DataModuleState(
             scaler=scaler,
             feature_std=feature_std,
@@ -266,7 +270,7 @@ class AugmentedDataModule(DataModule):
                   X_val: np.ndarray, 
                   state: DataModuleState
                   ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """Transform validation data (no augmentation)."""
+        """变换验证数据（不进行增强）"""
         X_scaled = state.scaler.transform(X_val)
         return X_scaled, None
 
@@ -302,40 +306,3 @@ def get_data_module(name: str, **kwargs) -> DataModule:
     
     return modules[name_lower](**kwargs)
 
-
-# ============================================================
-# 模块测试
-# ============================================================
-
-if __name__ == "__main__":
-    print("=== 数据模块测试 ===\n")
-    
-    # 生成测试数据
-    np.random.seed(42)
-    n_samples = 100
-    n_features = 10
-    X = np.random.randn(n_samples, n_features) * 10 + 50
-    y = np.random.randn(n_samples) * 100 + 1000
-    groups = np.random.choice(['A', 'B', 'C'], n_samples)
-    
-    # 划分训练/验证
-    train_idx = np.arange(80)
-    val_idx = np.arange(80, 100)
-    
-    X_train, X_val = X[train_idx], X[val_idx]
-    y_train, y_val = y[train_idx], y[val_idx]
-    groups_train = groups[train_idx]
-    
-    # 测试各模块
-    for name in ['raw', 'balanced', 'augmented']:
-        print(f"--- {name.upper()} ---")
-        module = get_data_module(name)
-        
-        X2, y2, weights, state = module.fit_transform(X_train, y_train, groups_train)
-        print(f"训练后: X2.shape={X2.shape}, weights.sum()={weights.sum():.2f}")
-        
-        X_val2, _ = module.transform(X_val, state)
-        print(f"验证后: X_val2.shape={X_val2.shape}")
-        print()
-    
-    print("✅ 所有数据模块测试通过！")
