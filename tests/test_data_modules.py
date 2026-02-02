@@ -23,8 +23,7 @@ class TestRawDataModule:
         module = RawDataModule()
         X2, y2, weights, state = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         # 形状不变
@@ -37,8 +36,7 @@ class TestRawDataModule:
         module = RawDataModule()
         _, _, weights, _ = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         # 所有权重相等
@@ -49,8 +47,7 @@ class TestRawDataModule:
         module = RawDataModule()
         X_scaled, _, _, state = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         # 训练集标准化后均值接近0
@@ -66,8 +63,7 @@ class TestRawDataModule:
         module = RawDataModule()
         _, _, _, state = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         assert state.scaler is not None
@@ -82,8 +78,7 @@ class TestBalancedDataModule:
         module = BalancedDataModule(n_bins=5)
         X2, y2, weights, state = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         # 形状不变
@@ -95,8 +90,7 @@ class TestBalancedDataModule:
         module = BalancedDataModule(n_bins=5)
         _, _, weights, _ = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         # 权重总和等于样本数
@@ -107,8 +101,7 @@ class TestBalancedDataModule:
         module = BalancedDataModule(n_bins=5)
         _, _, weights, _ = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         assert np.all(weights > 0)
@@ -123,8 +116,7 @@ class TestAugmentedDataModule:
         module = AugmentedDataModule(n_aug=n_aug)
         X2, y2, _, _ = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         original_size = len(train_val_split['X_train'])
@@ -137,8 +129,7 @@ class TestAugmentedDataModule:
         module = AugmentedDataModule(n_aug=3)
         X2, y2, _, state = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         original_size = len(train_val_split['X_train'])
@@ -152,8 +143,7 @@ class TestAugmentedDataModule:
         module = AugmentedDataModule(n_aug=5)
         _, _, _, state = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         X_val_scaled, _ = module.transform(train_val_split['X_val'], state)
@@ -166,8 +156,7 @@ class TestAugmentedDataModule:
         module = AugmentedDataModule(n_aug=10, clip_min=0.0)
         X2, _, _, _ = module.fit_transform(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         # 所有值应非负（因为 clip_min=0.0）

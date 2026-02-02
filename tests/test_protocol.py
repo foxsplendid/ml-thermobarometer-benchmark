@@ -26,8 +26,7 @@ class TestPipeline:
 
         pipeline.fit(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         # 使用 transform 后的数据预测
@@ -50,8 +49,7 @@ class TestPipeline:
 
         pipeline.fit(
             train_val_split['X_train'],
-            train_val_split['y_train'],
-            train_val_split['groups_train']
+            train_val_split['y_train']
         )
 
         # 直接使用原始数据
@@ -89,7 +87,7 @@ class TestStratifiedCVProtocol:
 
     def test_basic_run(self, sample_data):
         """基本 CV 运行"""
-        X, y, groups = sample_data
+        X, y = sample_data
 
         protocol = StratifiedCVProtocol(n_splits=3, random_seed=42)
 
@@ -101,7 +99,7 @@ class TestStratifiedCVProtocol:
             )
 
         results = protocol.run(
-            X, y, groups,
+            X, y,
             pipeline_factory,
             verbose=False
         )
@@ -113,7 +111,7 @@ class TestStratifiedCVProtocol:
 
     def test_with_stratify_labels(self, sample_data, pt_data):
         """带分层标签的 CV"""
-        X, y, groups = sample_data
+        X, y = sample_data
         y_T, _ = pt_data
 
         # 创建分层标签
@@ -129,7 +127,7 @@ class TestStratifiedCVProtocol:
             )
 
         results = protocol.run(
-            X, y, groups,
+            X, y,
             pipeline_factory,
             stratify_labels=bins,
             verbose=False
@@ -139,7 +137,7 @@ class TestStratifiedCVProtocol:
 
     def test_predictions_cover_all_samples(self, sample_data):
         """预测应覆盖所有样本"""
-        X, y, groups = sample_data
+        X, y = sample_data
 
         protocol = StratifiedCVProtocol(n_splits=3, random_seed=42)
 
@@ -150,7 +148,7 @@ class TestStratifiedCVProtocol:
                 corr_module=NoCorrection()
             )
 
-        results = protocol.run(X, y, groups, pipeline_factory, verbose=False)
+        results = protocol.run(X, y, pipeline_factory, verbose=False)
 
         # 所有样本都应该有预测
         pred_indices = results['predictions']['sample_idx'].values

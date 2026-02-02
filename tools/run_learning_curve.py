@@ -69,7 +69,12 @@ from main import load_data, prepare_splits
 from src.correction_modules import get_correction_module
 from src.data_modules import get_data_module
 from src.model_modules import get_model_module
-from src.protocol import Pipeline, StratifiedCVProtocol
+from src.protocol import (
+    Pipeline,
+    StratifiedCVProtocol,
+    _merge_sparse_bins,
+    _get_effective_n_splits,
+)
 
 # 从集中配置获取
 BASE_CONFIG = get_config_dict()
@@ -162,92 +167,22 @@ def merge_runs_files(merge_dir: str) -> pd.DataFrame:
 # 辅助函数
 # ============================================================
 
+# 注：_merge_sparse_bins 和 _get_effective_n_splits 已从 src.protocol 导入
+# 为保持向后兼容，创建简单的包装函数
+
 def get_effective_n_splits(n_samples: int, strat_labels: np.ndarray, requested_n_splits: int) -> int:
-    """
-    计算有效的 n_splits，避免 StratifiedKFold 报错
-
-    降级策略：
-    1. 检查最小 bin 的样本数
-    2. 如果最小 bin 样本数 < requested_n_splits，降级到 min(最小bin样本数, requested_n_splits)
-    3. n_splits 至少为 2
-
-    Parameters
-    ----------
-    n_samples : int
-        总样本数
-    strat_labels : np.ndarray
-        分层标签
-    requested_n_splits : int
-        请求的折数
-
-    Returns
-    -------
-    effective_n_splits : int
-        实际可用的折数
-    """
-    if strat_labels is None:
-        return min(requested_n_splits, n_samples)
-
-    # 统计每个 bin 的样本数
-    unique_bins, bin_counts = np.unique(strat_labels, return_counts=True)
-    min_bin_count = bin_counts.min()
-
-    # n_splits 不能超过最小 bin 的样本数
-    effective = min(requested_n_splits, min_bin_count, n_samples)
-    # 至少 2 折
-    effective = max(2, effective)
-
-    return effective
+    """计算有效的 n_splits（兼容包装，调用 src.protocol._get_effective_n_splits）"""
+    return _get_effective_n_splits(strat_labels, requested_n_splits, n_samples)
 
 
 def merge_sparse_bins(strat_labels: np.ndarray, min_samples_per_bin: int = 10) -> np.ndarray:
-    """
-    合并稀疏 bins，确保每个 bin 至少有 min_samples_per_bin 个样本
-
-    策略：将样本数不足的 bin 合并到最近的非稀疏 bin
-
-    注意：min_samples_per_bin 应设为 >= n_splits，以确保分层CV可以正常执行
-
-    Parameters
-    ----------
-    strat_labels : np.ndarray
-        原始分层标签
-    min_samples_per_bin : int
-        每个 bin 最少样本数（默认10，对应10折CV）
-
-    Returns
-    -------
-    merged_labels : np.ndarray
-        合并后的分层标签
-    """
-    unique_bins, bin_counts = np.unique(strat_labels, return_counts=True)
-    merged_labels = strat_labels.copy()
-
-    # 找出稀疏 bins
-    sparse_bins = unique_bins[bin_counts < min_samples_per_bin]
-    if len(sparse_bins) == 0:
-        return merged_labels
-
-    # 找出非稀疏 bins
-    non_sparse_bins = unique_bins[bin_counts >= min_samples_per_bin]
-    if len(non_sparse_bins) == 0:
-        # 所有 bin 都稀疏，合并为一个
-        return np.zeros_like(strat_labels)
-
-    # 将稀疏 bin 合并到最近的非稀疏 bin
-    for sparse_bin in sparse_bins:
-        # 找到最近的非稀疏 bin（按 bin ID 距离）
-        distances = np.abs(non_sparse_bins - sparse_bin)
-        nearest_bin = non_sparse_bins[np.argmin(distances)]
-        merged_labels[strat_labels == sparse_bin] = nearest_bin
-
-    return merged_labels
+    """合并稀疏 bins（兼容包装，调用 src.protocol._merge_sparse_bins）"""
+    return _merge_sparse_bins(strat_labels, min_samples_per_bin)
 
 
 def run_cv_for_subsample(
     X_sub: np.ndarray,
     y_sub: np.ndarray,
-    groups_sub: np.ndarray,
     strat_labels_sub: np.ndarray,
     pipeline_factory: Callable[..., Pipeline],
     corr_module,
@@ -263,8 +198,6 @@ def run_cv_for_subsample(
         子采样特征矩阵
     y_sub : np.ndarray
         子采样目标值
-    groups_sub : np.ndarray
-        子采样分组标签
     strat_labels_sub : np.ndarray
         子采样分层标签
     pipeline_factory : Callable
@@ -292,7 +225,7 @@ def run_cv_for_subsample(
 
     try:
         results = protocol.run(
-            X_sub, y_sub, groups_sub,
+            X_sub, y_sub,
             pipeline_factory,
             uncertainty_module=None,
             corr_module=corr_module,
@@ -388,7 +321,6 @@ def create_nested_subsamples(
 def run_learning_curve(
     X_train_full: np.ndarray,
     y_train_full: np.ndarray,
-    groups_train_full: np.ndarray,
     strat_labels_train_full: np.ndarray,
     fractions: List[float],
     repeat_ids: List[int],
@@ -401,7 +333,7 @@ def run_learning_curve(
     feature_set: str,
     output_dir: Optional[str] = None,
     resume: bool = False,
-    checkpoint_interval: int = 10,
+    checkpoint_interval: int = 20,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -419,8 +351,6 @@ def run_learning_curve(
         完整训练集特征
     y_train_full : np.ndarray
         完整训练集目标（将被 targets 覆盖）
-    groups_train_full : np.ndarray
-        完整训练集分组
     strat_labels_train_full : np.ndarray
         完整训练集分层标签
     fractions : List[float]
@@ -446,7 +376,7 @@ def run_learning_curve(
     resume : bool
         是否从上次中断处继续
     checkpoint_interval : int
-        检查点间隔（每 N 个 repeat 保存一次）
+        检查点间隔（每 N 个任务保存一次）
     verbose : bool
         是否打印进度
 
@@ -461,19 +391,34 @@ def run_learning_curve(
 
     # 断点续跑：加载已完成的任务
     completed_tasks = set()
-    checkpoint_file = None
     if output_dir and resume:
-        checkpoint_file = os.path.join(output_dir, "learning_curve_checkpoint.csv")
-        if os.path.exists(checkpoint_file):
+        # 查找最新的检查点文件（支持新旧两种命名格式）
+        import re
+        checkpoint_files = []
+        for fname in os.listdir(output_dir):
+            if fname.startswith("learning_curve_checkpoint"):
+                fpath = os.path.join(output_dir, fname)
+                # 匹配新格式 learning_curve_checkpoint_task00020.csv
+                m = re.match(r"learning_curve_checkpoint_task(\d+)\.csv", fname)
+                if m:
+                    checkpoint_files.append((int(m.group(1)), fpath))
+                # 匹配旧格式 learning_curve_checkpoint.csv
+                elif fname == "learning_curve_checkpoint.csv":
+                    checkpoint_files.append((0, fpath))
+
+        if checkpoint_files:
+            # 选择任务数最大的检查点
+            checkpoint_files.sort(reverse=True)
+            latest_checkpoint = checkpoint_files[0][1]
             try:
-                existing_df = pd.read_csv(checkpoint_file)
+                existing_df = pd.read_csv(latest_checkpoint)
                 # 用 (repeat, fraction, model, target) 作为唯一标识
                 for _, row in existing_df.iterrows():
                     key = (row['repeat'], row['fraction'], row['model'], row['target'])
                     completed_tasks.add(key)
                     runs_records.append(row.to_dict())
                 if verbose:
-                    print(f"  [Resume] 已加载 {len(completed_tasks)} 个已完成任务")
+                    print(f"  [Resume] 已加载 {len(completed_tasks)} 个已完成任务 from {os.path.basename(latest_checkpoint)}")
             except Exception as e:
                 if verbose:
                     print(f"  [Resume] 加载检查点失败: {e}")
@@ -499,7 +444,6 @@ def run_learning_curve(
             sub_indices = nested_indices[fraction]
 
             X_sub = X_train_full[sub_indices]
-            groups_sub = groups_train_full[sub_indices]
             strat_labels_sub = strat_labels_train_full[sub_indices]
             n_train_sub = len(sub_indices)
 
@@ -529,7 +473,7 @@ def run_learning_curve(
 
                     # 运行 CV
                     cv_result = run_cv_for_subsample(
-                        X_sub, y_sub, groups_sub, strat_labels_sub,
+                        X_sub, y_sub, strat_labels_sub,
                         pipeline_factory, corr_module, n_splits, repeat_seed
                     )
 
@@ -560,13 +504,13 @@ def run_learning_curve(
                     runs_records.append(record)
                     new_task_count += 1
 
-                    # 定期保存检查点
-                    if output_dir and checkpoint_interval > 0 and new_task_count % (checkpoint_interval * len(fractions) * len(models) * len(targets)) == 0:
+                    # 定期保存检查点（每 checkpoint_interval 个任务保存一次）
+                    if output_dir and checkpoint_interval > 0 and new_task_count % checkpoint_interval == 0:
                         checkpoint_df = pd.DataFrame(runs_records)
-                        checkpoint_file = os.path.join(output_dir, "learning_curve_checkpoint.csv")
+                        checkpoint_file = os.path.join(output_dir, f"learning_curve_checkpoint_task{new_task_count:05d}.csv")
                         checkpoint_df.to_csv(checkpoint_file, index=False)
                         if verbose:
-                            print(f"\n  [Checkpoint] 已保存 {len(runs_records)} 条记录")
+                            print(f"\n  [Checkpoint] task={new_task_count} 已保存 {len(runs_records)} 条记录 -> {os.path.basename(checkpoint_file)}")
 
     if verbose:
         print()  # 换行
@@ -709,8 +653,8 @@ def main():
     # 断点续跑选项
     parser.add_argument('--resume', action='store_true',
                         help='从上次中断处继续（自动跳过已完成的任务）')
-    parser.add_argument('--checkpoint-interval', type=int, default=10,
-                        help='检查点间隔（默认: 每10个repeat保存一次）')
+    parser.add_argument('--checkpoint-interval', type=int, default=20,
+                        help='检查点间隔（默认: 每20个任务保存一次）')
 
     # 绘图选项
     parser.add_argument('--no-plot', action='store_true',
@@ -784,18 +728,17 @@ def main():
 
     # 加载数据
     print("\n[1/4] 加载数据...")
-    X, y_T, y_P, groups = load_data(BASE_CONFIG, feature_set=feature_set)
+    X, y_T, y_P = load_data(BASE_CONFIG, feature_set=feature_set)
 
     # 准备划分
     print("\n[2/4] 准备数据划分...")
-    split_data = prepare_splits(X, y_T, y_P, groups, {'random_seed': args.seed})
+    split_data = prepare_splits(X, y_T, y_P, {'random_seed': args.seed})
     train_idx = split_data['train_idx']
     tp_bins_train = split_data['tp_bins_train']
 
     X_train_full = X[train_idx]
     y_T_train_full = y_T[train_idx]
     y_P_train_full = y_P[train_idx]
-    groups_train_full = groups[train_idx]
 
     print(f"  训练集大小: {len(train_idx)}")
     print(f"  P-T bins 数量: {len(np.unique(tp_bins_train))}")
@@ -809,7 +752,6 @@ def main():
     runs_df = run_learning_curve(
         X_train_full=X_train_full,
         y_train_full=y_T_train_full,  # 占位，实际由 targets 覆盖
-        groups_train_full=groups_train_full,
         strat_labels_train_full=tp_bins_train,
         fractions=args.fractions,
         repeat_ids=repeat_ids,

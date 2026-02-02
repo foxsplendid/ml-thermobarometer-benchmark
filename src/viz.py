@@ -512,7 +512,7 @@ def plot_residual_distribution_comparison(results_dict: Dict[str, pd.DataFrame],
 
 
 # ============================================================
-# 论文图件函数（V5.1 新增）
+# 论文图件函数
 # ============================================================
 
 def plot_pt_grid_cv_splits(y_t: np.ndarray,

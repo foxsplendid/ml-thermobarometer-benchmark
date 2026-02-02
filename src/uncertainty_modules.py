@@ -3,9 +3,22 @@
 M4 不确定性模块 - MCUncertaintyEstimator
 
 功能：蒙特卡洛输入扰动、预测分布、校准指标
+
+设计说明：
+    EPMA 误差模型采用按氧化物列名映射的相对误差：
+    - 主量元素（SiO2, Al2O3, FeO, MgO, CaO）：3% 相对误差
+    - 低含量元素（TiO2, MnO, Na2O, Cr2O3, K2O）：8% 相对误差
+
+    设计依据：Ágreda-López et al. (2024) ML_PT_Pyworkflow
+
+    扰动策略：
+    - 按列名固定映射相对误差（而非按数值阈值）
+    - 不做负值截断（clip），保留完整的正态分布扰动
+    - 不做闭合约束（closure），与训练数据预处理保持一致
+    - 与数据增强模块共用扰动函数，确保一致性
 """
 import numpy as np
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from .interfaces import UncertaintyModule
 
 # ============================================================
@@ -14,75 +27,102 @@ from .interfaces import UncertaintyModule
 class MCUncertaintyEstimator(UncertaintyModule):
     """
     MC输入扰动不确定性估计
-    EPMA模式：>1wt%使用3%误差，<=1wt%使用8%误差
+
+    EPMA模式：按氧化物列名映射相对误差
+    - 主量元素：3% (SiO2, Al2O3, FeO, MgO, CaO)
+    - 低含量元素：8% (TiO2, MnO, Na2O, Cr2O3, K2O)
+
+    注意：
+    - 不做负值截断，允许扰动后出现负值以保持分布完整性
+    - 与 AugmentedDataModule 共用扰动函数
     """
 
     def __init__(self,
                  n_mc: int = 1000,
-                 noise_level: float = 0.02,
-                 error_model: str = "epma",
-                 rel_err_high: float = 0.03,
-                 rel_err_low: float = 0.08,
-                 error_threshold: float = 1.0,
-                 clip_min: Optional[float] = 0.0,
-                 percentiles: tuple = (16, 50, 84),
+                 feature_names: Optional[List[str]] = None,
+                 percentiles: tuple = (5, 16, 50, 84, 95),
                  random_seed: int = 42):
+        """
+        Parameters
+        ----------
+        n_mc : int
+            MC 采样次数
+        feature_names : List[str], optional
+            特征列名列表，用于按列名映射相对误差
+        percentiles : tuple
+            要计算的分位数
+        random_seed : int
+            随机种子
+        """
         self.n_mc = n_mc
-        self.noise_level = noise_level
-        self.error_model = error_model.lower().strip() if isinstance(error_model, str) else "epma"
-        self.rel_err_high = rel_err_high
-        self.rel_err_low = rel_err_low
-        self.error_threshold = error_threshold
-        self.clip_min = clip_min
+        self.feature_names = feature_names
         self.percentiles = percentiles
         self.random_seed = random_seed
 
     def predict_distribution(self,
                              pipeline: Any,
                              X: np.ndarray,
-                             mc_params: Optional[Dict[str, Any]] = None
+                             mc_params: Optional[Dict[str, Any]] = None,
+                             fold_idx: int = 0
                              ) -> Dict[str, np.ndarray]:
-        # 使用隔离的 RandomState，避免污染全局随机状态
-        rng = np.random.RandomState(self.random_seed)
+        """
+        对输入 X 进行 MC 扰动，返回预测分布统计量
+
+        Parameters
+        ----------
+        pipeline : Pipeline
+            已拟合的模型管道
+        X : np.ndarray
+            输入特征矩阵 (n_samples, n_features)
+        mc_params : dict, optional
+            可选参数覆盖，支持:
+            - n_mc: MC 采样次数
+            - feature_names: 特征列名列表
+            - percentiles: 分位数列表
+            - seed_offset: 额外的种子偏移量
+        fold_idx : int
+            折索引，用于派生不同的随机种子，确保各折/重复使用不同随机序列
+
+        Returns
+        -------
+        dict
+            包含 samples, mean, std, median, p5/p16/p84/p95 等
+        """
+        from .perturbation import get_rel_err_vector, epma_perturb
+
+        # 使用 base_seed + fold_idx 派生种子，确保各折使用不同随机序列
+        seed_offset = mc_params.get('seed_offset', 0) if mc_params else 0
+        effective_seed = self.random_seed + fold_idx + seed_offset
+        rng = np.random.RandomState(effective_seed)
 
         n_mc = mc_params.get('n_mc', self.n_mc) if mc_params else self.n_mc
-        noise_level = mc_params.get('noise_level', self.noise_level) if mc_params else self.noise_level
-        error_model = mc_params.get('error_model', self.error_model) if mc_params else self.error_model
-        rel_err_high = mc_params.get('rel_err_high', self.rel_err_high) if mc_params else self.rel_err_high
-        rel_err_low = mc_params.get('rel_err_low', self.rel_err_low) if mc_params else self.rel_err_low
-        error_threshold = mc_params.get('error_threshold', self.error_threshold) if mc_params else self.error_threshold
-        clip_min = mc_params.get('clip_min', self.clip_min) if mc_params else self.clip_min
         percentiles = mc_params.get('percentiles', self.percentiles) if mc_params else self.percentiles
+        feature_names = mc_params.get('feature_names', self.feature_names) if mc_params else self.feature_names
 
-        error_model = error_model.lower().strip() if isinstance(error_model, str) else "epma"
+        # 获取特征列名（如果未指定，根据维度推断）
+        if feature_names is None:
+            if X.shape[1] == 18:
+                from config import DataConfig
+                feature_names = DataConfig().feature_sets['Liquid']
+            elif X.shape[1] == 9:
+                from config import DataConfig
+                feature_names = DataConfig().feature_sets['NoLiquid']
+            else:
+                # 未知维度，使用默认 3% 误差
+                feature_names = [f'feature_{i}' for i in range(X.shape[1])]
+
+        # 获取按列名映射的相对误差向量
+        rel_err_vec = get_rel_err_vector(feature_names)
 
         n_samples = X.shape[0]
         predictions = np.zeros((n_mc, n_samples))
 
-        if error_model == "epma":
-            rel_err = np.where(
-                np.abs(X) > error_threshold,
-                rel_err_high,
-                rel_err_low
-            )
-            scale = rel_err * np.abs(X)
-            for i in range(n_mc):
-                noise = rng.normal(0.0, scale, size=X.shape)
-                X_perturbed = X + noise
-                if clip_min is not None:
-                    X_perturbed = np.maximum(X_perturbed, clip_min)
-                predictions[i] = pipeline.predict_raw(X_perturbed)
-        else:
-            feature_std = np.std(X, axis=0)
-            feature_std = np.where(feature_std < 1e-10, 1.0, feature_std)
-            scale = noise_level * feature_std
-            for i in range(n_mc):
-                noise = rng.normal(0.0, scale, size=X.shape)
-                X_perturbed = X + noise
-                if clip_min is not None:
-                    X_perturbed = np.maximum(X_perturbed, clip_min)
-                predictions[i] = pipeline.predict_raw(X_perturbed)
+        # MC 扰动预测
+        for i in range(n_mc):
+            X_perturbed = epma_perturb(X, rel_err_vec, rng)
+            predictions[i] = pipeline.predict_raw(X_perturbed)
 
+        # 计算分位数
         percentiles = tuple(percentiles)
         pct_values = np.percentile(predictions, percentiles, axis=0)
         pct_map = {p: pct_values[i] for i, p in enumerate(percentiles)}

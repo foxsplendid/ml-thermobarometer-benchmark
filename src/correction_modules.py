@@ -2,12 +2,14 @@
 """
 M3 校正模块 - NoCorrection, ResidualRegressionCorrector, SegmentedLinearCorrector
 
-【地质学ML传统实践说明】
-在地质学领域的机器学习实践中，简单模型（ERT、CatBoost、RandomForest）的
-偏差校正器通常使用in-sample预测进行训练。这种做法风险较低但理论上可能
-导致轻微过拟合。StrictOOFStacking使用严格的内层CV生成OOF预测，避免此问题。
+【校正器拟合策略说明】
+在当前架构中，偏差校正器在协议层（StratifiedCVProtocol）使用全局 OOF 预测进行拟合，
+而非在 Pipeline 内部或逐折拟合。这种全局 OOF 拟合方式可以：
+1. 避免校正器过拟合（使用 OOF 预测而非 in-sample 预测）
+2. 保持校正器的一致性（所有验证折使用同一个校正模型）
+3. 简化代码逻辑（校正器拟合与模型训练解耦）
 
-详见 interfaces.py 中 ModelModule.get_oof_predictions() 的说明。
+详见 protocol.py 中 StratifiedCVProtocol.run() 的实现。
 """
 
 import numpy as np
@@ -268,7 +270,7 @@ class SegmentedLinearCorrector(CorrectionModule):
             'method': 'segmented_linear',
             'n_segments': len(corr_model.get('segment_models', [])),
             'clip_to_train_range': bool(corr_model.get('clip_to_train_range')),
-            'clip_min': corr_model.get('y_min'),
+            'y_min': corr_model.get('y_min'),
             'clip_max': corr_model.get('y_max'),
         }
 

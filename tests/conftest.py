@@ -28,7 +28,7 @@ def sample_data():
     Returns
     -------
     tuple
-        (X, y, groups) - 特征矩阵、目标值、分组标签
+        (X, y) - 特征矩阵、目标值
     """
     np.random.seed(42)
     n_samples = 100
@@ -41,10 +41,7 @@ def sample_data():
     # 模拟温度目标（800-1400°C）
     y = np.random.randn(n_samples) * 100 + 1100
 
-    # 模拟文献分组
-    groups = np.random.choice(['RefA', 'RefB', 'RefC', 'RefD'], n_samples)
-
-    return X, y, groups
+    return X, y
 
 
 @pytest.fixture
@@ -55,7 +52,7 @@ def sample_data_large():
     Returns
     -------
     tuple
-        (X, y, groups)
+        (X, y)
     """
     np.random.seed(42)
     n_samples = 500
@@ -64,9 +61,8 @@ def sample_data_large():
     X = np.random.randn(n_samples, n_features) * 10 + 50
     X = np.clip(X, 0, 100)
     y = np.random.randn(n_samples) * 100 + 1100
-    groups = np.random.choice([f'Ref{i}' for i in range(20)], n_samples)
 
-    return X, y, groups
+    return X, y
 
 
 @pytest.fixture
@@ -77,9 +73,9 @@ def train_val_split(sample_data):
     Returns
     -------
     dict
-        包含 X_train, X_val, y_train, y_val, groups_train
+        包含 X_train, X_val, y_train, y_val
     """
-    X, y, groups = sample_data
+    X, y = sample_data
     train_idx = np.arange(80)
     val_idx = np.arange(80, 100)
 
@@ -88,8 +84,6 @@ def train_val_split(sample_data):
         'X_val': X[val_idx],
         'y_train': y[train_idx],
         'y_val': y[val_idx],
-        'groups_train': groups[train_idx],
-        'groups_val': groups[val_idx],
     }
 
 
@@ -138,8 +132,7 @@ def trained_raw_module(train_val_split):
     module = RawDataModule(random_seed=42)
     X_scaled, y, weights, state = module.fit_transform(
         train_val_split['X_train'],
-        train_val_split['y_train'],
-        train_val_split['groups_train']
+        train_val_split['y_train']
     )
 
     return module, state, X_scaled, weights

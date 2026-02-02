@@ -24,8 +24,7 @@ class RawDataModule(DataModule):
     
     def fit_transform(self, 
                       X_train: np.ndarray, 
-                      y_train: np.ndarray, 
-                      groups_train: np.ndarray
+                      y_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """标准化训练数据"""
         # 拟合标准化器
@@ -87,8 +86,7 @@ class BalancedDataModule(DataModule):
     
     def fit_transform(self, 
                       X_train: np.ndarray, 
-                      y_train: np.ndarray, 
-                      groups_train: np.ndarray
+                      y_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """标准化并计算样本权重"""
         # 1. 标准化
@@ -211,8 +209,7 @@ class AugmentedDataModule(DataModule):
     def fit_transform(
                       self, 
                       X_train: np.ndarray, 
-                      y_train: np.ndarray, 
-                      groups_train: np.ndarray
+                      y_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """标准化并生成增强样本"""
         # 使用调用计数器派生种子，确保每次调用使用不同的随机状态

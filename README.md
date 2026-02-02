@@ -12,6 +12,7 @@
 - ✅ **严格防泄露**：所有拟合操作仅在训练折内完成
 - ✅ **双特征集对比**：NoLiquid(9特征) vs Liquid(18特征)
 - ✅ **P-T分层采样**：基于P-T网格的分层交叉验证，优先保证P-T分布平衡
+- ✅ **稀疏 bin 保护**：自动合并稀疏 bins，并按需降低折数以避免崩溃
 - ✅ **T/P 独立建模**：温度与压力采用完全独立的建模链路
 - ✅ **Strict OOF Stacking**：严格 OOF 元特征生成，无数据泄露
 - ✅ **工具分离**：主实验与绘图/稳定性测试/不确定性量化分离，按需运行
@@ -22,7 +23,7 @@
 ml-thermobarometer-benchmark/
 ├── input.csv                    # 校准数据集（2079行，latin-1编码）
 ├── main.py                      # 主入口（运行实验矩阵）
-├── config.py                    # 集中配置管理（唯一配置来源）
+├── config.py                    # 集中配置管理（见下方配置说明）
 ├── requirements.txt             # Python 依赖
 ├── README.md                    # 本文档
 │
@@ -35,6 +36,7 @@ ml-thermobarometer-benchmark/
 │   ├── uncertainty_modules.py   # M4: MCUncertaintyEstimator
 │   ├── protocol.py              # Pipeline + StratifiedKFold 协议
 │   ├── splitters.py             # P-T网格采样与分层工具
+│   ├── perturbation.py          # 共用 EPMA 扰动模块
 │   ├── metrics.py               # 指标计算
 │   ├── logger.py                # 统一日志模块
 │   └── viz.py                   # 可视化（含论文图件）
@@ -50,7 +52,7 @@ ml-thermobarometer-benchmark/
 │
 ├── tools/                       # 工具脚本（独立运行）
 │   ├── run_stability.py         # 稳定性测试
-│   ├── run_mc_uncertainty.py    # MC不确定性
+│   ├── run_error_propagation.py # 分析误差传播（MC不确定性）
 │   ├── run_learning_curve.py    # 学习曲线分析
 │   ├── plot_offline_figures.py  # 离线绘图 + 论文图件
 │   └── checkpoint_manager.py    # 检查点管理工具
@@ -61,9 +63,33 @@ ml-thermobarometer-benchmark/
     ├── config_used.yaml         # 配置记录
     ├── logs/                    # 日志文件
     ├── learning_curve_*.csv     # 学习曲线结果
+    ├── stability/               # 稳定性测试结果
+    ├── error_propagation/       # 分析误差传播结果
     ├── models/                  # 保存的模型
     └── figures/                 # 可视化图表
 ```
+
+### 配置管理说明
+
+`config.py` 是项目的配置入口，通过 `get_config_dict()` 获取配置。
+配置优先级：**CLI > config.yaml > config.py**；未显式指定的 `model/augmentation/uncertainty` 参数会自动注入对应模块。
+配置分为两类：
+
+**✅ 运行时配置（可根据需要修改）**
+- `data_path`: 数据文件路径
+- `n_splits`: CV 折数（默认 10）
+- `random_seed`: 随机种子（默认 42）
+- `output_dir`: 输出目录
+
+**⚠️ 模型默认参数（经过调优，不建议随意修改）**
+- `model_defaults.ert`: ExtraTrees 参数（n_estimators=200, max_depth=15）
+- `model_defaults.catboost`: CatBoost 参数（iterations=1000, depth=6）
+- `augmentation.n_aug`: 增强副本数（默认 15，基于 Ágreda-López 2024）
+- `uncertainty.n_mc / uncertainty.percentiles`: MC 不确定性默认配置
+
+说明：`n_splits` 是请求值，若 P-T bins 过稀疏会自动合并并下调折数，实际值会记录在 `config_used.yaml`。
+
+修改模型参数可能导致性能下降或与论文结果不可复现。如需调参，建议先使用学习曲线工具评估影响。
 
 ## 整体工作流
 
@@ -86,11 +112,17 @@ ml-thermobarometer-benchmark/
 │ 10-fold CV    │       │ 学习曲线分析  │       │ 稳定性测试    │
 └───────┬───────┘       └───────┬───────┘       └───────┬───────┘
         │                       │                       │
+        │               ┌───────▼───────┐               │
+        │               │run_error_     │               │
+        │               │propagation.py │               │
+        │               │分析误差传播   │               │
+        │               └───────┬───────┘               │
+        │                       │                       │
         ▼                       ▼                       ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │                         results/                                   │
-│  metrics_summary.csv | learning_curve_*.csv | stability/* | uncertainty/*   │
-│  *_predictions.parquet | models/*.joblib                          │
+│  metrics_summary.csv | learning_curve_*.csv | stability/*         │
+│  error_propagation/* | *_predictions.parquet | models/*.joblib    │
 └───────────────────────────────┬───────────────────────────────────┘
                                 │
                     ┌───────────▼───────────┐
@@ -185,7 +217,7 @@ CPX氧化物（9个）+ 共存熔体（LIQ）氧化物（9个）：
 |------|------|----------|
 | `RawDataModule` | 仅标准化 | 基线对照，权重=1 |
 | `BalancedDataModule` | 分箱重加权 | 10 bins, quantile策略，逆频率权重 |
-| `AugmentedDataModule` | EPMA 误差模型增强 | >1 wt% 3%误差, ≤1 wt% 8%误差，n=15 |
+| `AugmentedDataModule` | EPMA 误差模型增强 | 按列名映射误差率，主量 3%，低含量 8%，n=15 |
 
 ### M2 模型模块 (ModelModule)
 
@@ -203,7 +235,7 @@ CPX氧化物（9个）+ 共存熔体（LIQ）氧化物（9个）：
 | `ResidualRegressionCorrector` | 残差回归校正（Ridge） | 系统性偏差修正（可选，保留接口） |
 | `SegmentedLinearCorrector` | 分段线性校正 | 端元效应修正|
 
-**注意**：根据地质学ML传统实践，简单模型（ERT、CatBoost）的校正器使用in-sample预测，StrictOOFStacking使用严格OOF预测。
+**注意**：所有模型的校正器统一使用全量训练集的 OOF（Out-of-Fold）预测进行拟合，确保无数据泄露。
 
 ### M4 不确定性模块 (UncertaintyModule)
 
@@ -236,7 +268,6 @@ CPX氧化物（9个）+ 共存熔体（LIQ）氧化物（9个）：
 | `compute_pt_edges()` | 计算 P-T 网格边界（k = ceil(sqrt(n))） |
 | `assign_pt_bins()` | 分配样本到 P-T 格子 |
 | `select_test_indices()` | 每个非空格子随机选 1 个样本 |
-| `stratified_subsample_indices()` | 分层子采样（学习曲线用） |
 
 ### `metrics.py` - 指标计算
 
@@ -334,11 +365,14 @@ python tools/run_learning_curve.py --merge-dir results/lc
 | `--model-module` | `ert` | 模型 |
 | `--data-module` | `augmented` | 数据模块 |
 | `--n-repeats` | `1000` | 重复次数（不同随机种子） |
+| `--random-seed` | `42` | 基础随机种子（实际种子=base+repeat_id） |
 | `--repeat-start` | None | 分段运行 repeat 起始 |
 | `--repeat-end` | None | 分段运行 repeat 结束 |
 | `--merge-dir` | None | 合并分段结果并汇总 |
 | `--checkpoint-interval` | `100` | 每N次保存检查点 |
 | `--resume` | False | 从检查点恢复 |
+
+注：稳定性重复的随机种子采用 `base_seed + repeat_id` 派生。
 
 **输出**：
 ```
@@ -367,25 +401,64 @@ python tools/run_stability.py --repeat-start 800 --repeat-end 999
 python tools/run_stability.py --merge-dir results
 ```
 
-### run_mc_uncertainty.py - MC 不确定性
+### run_error_propagation.py - 分析误差传播
+
+**设计理念**：评估 EPMA 分析误差经固定模型放大后的输出离散度（analysis-limited precision），而非模型的总体预测误差。
+
+**核心原则**：
+1. **模型固定**：在全部训练数据上拟合一个固定模型，不做 CV、不重新训练
+2. **样本固定**：对固定的测试样本进行多次输入扰动
+3. **仅扰动输入**：对输入组成（氧化物 wt%）添加 EPMA 误差模型噪声
+4. **评估输出离散度**：计算输出分布的标准差、区间宽度等
+
+**EPMA 误差模型**（Ágreda-López et al. 2024）：
+- 按氧化物列名固定映射（而非按数值阈值）
+- 主量元素（SiO2, Al2O3, FeO, MgO, CaO）：3%
+- 低含量元素（TiO2, MnO, Na2O, Cr2O3, K2O）：8%
+- 不做负值截断，保留完整正态分布
+- 不做闭合约束，与训练数据预处理一致
 
 **输入参数**：
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
+| `--exp-id` | 自动生成 | 实验ID（与主实验命名一致） |
+| `--data-module` | `augmented` | 数据模块 |
 | `--model-module` | `ert` | 模型 |
-| `--corr-module` | `segmented` | 校正模块 |
+| `--feature-set` | `Liquid` | 特征集 |
+| `--random-seed` | `42` | 模型/数据随机种子 |
 | `--n-mc` | `1000` | MC 采样次数 |
-| `--mc-sample-size` | `10` | MC 测试样本数 |
+| `--mc-sample-size` | `-1` | 测试样本数（-1 = 全部测试集） |
+| `--mc-seed` | `42` | MC 随机种子 |
 
 **输出**：
 ```
-results/
-  uncertainty/
-    {exp_id}_mc_T_samples.csv
-    {exp_id}_mc_P_samples.csv
-    {exp_id}_mc_T_summary.csv
-    {exp_id}_mc_P_summary.csv
-    {exp_id}_mc_meta.json
+results/error_propagation/
+├── {exp_id}_ep_meta.json           # 实验元数据（含设计说明）
+├── {exp_id}_ep_T_summary.csv       # 温度汇总统计
+├── {exp_id}_ep_T_samples.csv       # 逐样本 T 预测与不确定度
+├── {exp_id}_ep_P_summary.csv       # 压力汇总统计
+└── {exp_id}_ep_P_samples.csv       # 逐样本 P 预测与不确定度
+```
+
+**输出指标说明**：
+| 指标类型 | 指标名 | 含义 |
+|----------|--------|------|
+| 总误差 | `total_rmse/mae/mbe/r2` | 相对真值的误差（含模型误差） |
+| 主实验 | `main_cv_rmse` | 主实验 10 折 CV-RMSE（用于对比） |
+| 分析误差 | `analysis_std_*` | 输出离散度（标准差） |
+| 分析误差 | `analysis_mad_*` | 输出离散度（MAD，稳健统计量） |
+| 分析误差 | `analysis_2mad_*` | 传播误差 = 2×MAD（推荐形式） |
+| 分析误差 | `analysis_interval_68/90_*` | 输出分布区间宽度 |
+| 自检 | `delta_median_mean/std` | 扰动偏移（应接近 0） |
+| 对比 | `propagated_vs_cv_ratio` | 传播误差/CV-RMSE 比例 |
+
+**使用方式**：
+```bash
+# 默认配置（ERT + Augmented + Liquid，对应主实验 E07）
+python tools/run_error_propagation.py --model-module ert
+
+# 指定其他配置
+python tools/run_error_propagation.py --model-module catboost --feature-set NoLiquid
 ```
 ### plot_offline_figures.py - 离线绘图
 
@@ -534,7 +607,7 @@ results/
 
 ---
 
-## 🔬 学习曲线分析（模型复杂度边界）
+##  学习曲线分析（模型复杂度边界）
 
 > 运行日期：2026-01-29 | 配置：Augmented + Liquid + None | 重复次数：30
 
@@ -593,159 +666,80 @@ results/
 ---
 # 第四部分：变更日志
 
-## 2026-02-01（V6.1）
+### V7.1 - 接口清理与版本同步
 
-**配置集中化 + CatBoost GPU 控制**：
+- 版本号同步至 `7.0.0`（`src/__init__.py`）
+- 移除 `groups` 参数：从所有模块接口中移除未使用的 groups 参数
+  - `DataModule.fit_transform()`
+  - `ModelModule.fit()`
+  - `Pipeline.fit()`
+  - `StratifiedCVProtocol.run()`
+  - `ExperimentMatrix.__init__()`
+- 更新 `main.py`：移除 `ExperimentMatrix` 调用中的 groups 参数
+- 整合 `docs/` 文档到 README 后删除 docs 文件夹
 
-### 配置管理重构
-- `config.py` 成为**项目唯一配置来源**
-  - `main.py` 现在通过 `from config import get_config_dict` 获取配置
-  - `tools/*.py` 同样从 `config.py` 获取配置，不再从 `main.py` 导入
-  - 支持 `config.yaml` 文件覆盖（可选）
+### V7.0 - 代码审计与清理
 
-### CatBoost GPU 控制
-- 新增 `CatBoostConfig` 数据类，支持 GPU 控制选项：
-  - `task_type: str = 'auto'`：默认自动检测
-  - `'CPU'`：强制使用 CPU
-  - `'GPU'`：强制使用 GPU
-  - `gpu_devices: str = '0'`：指定 GPU 设备
-- `CatBoostModel` 从集中配置读取默认值
+- 移除 `main.py` 中无效参数 `run_random_split=False`
+- 审计确认种子派生机制（`seed + fold_idx`）正确实现
+- 审计确认 OOF 校正策略文档与代码一致
+- 审计确认 `_infer_feature_names()` 已在基类统一实现
 
-### 代码清理
-- 移除 `main.py` 中重复的 CONFIG 定义
-- 统一警告过滤策略（保留关键警告类别）
+## V6 系列（2026-02）
 
-## 2026-02-01（V6）
+### V6.4 - EPMA 误差模型重构
 
-**架构级重构 - 日志系统、测试分离**：
+**核心变更**：rel_err 计算方式从"按数值阈值"改为"按氧化物列名映射"
 
-### 新增文件
-- `config.py`：集中配置管理模块
-  - 数据类配置（DataConfig, CVConfig, OutputConfig, ModelDefaults 等）
-  - 版本信息收集（`get_version_info()`）：自动记录 Git commit、Python 版本、依赖版本
-  - `get_config_dict()` 函数提供字典形式配置
-  
-- `src/logger.py`：统一日志模块
-  - 控制台输出（INFO 级别，彩色）
-  - 文件输出（DEBUG 级别，保存到 `results/logs/`）
-  - Windows ANSI 颜色支持
-  - 实验日志便捷函数（`log_experiment_start/end`, `log_fold_progress`）
+- 新增 `src/perturbation.py`：共用扰动模块，统一数据增强和误差传播的扰动逻辑
+- 新增 `config.py::EPMAErrorConfig`：按列名映射的 EPMA 误差配置
+- 修复 TiO2 在高含量时被错误分配 3% 误差的问题
 
-- `tests/` 目录：正式测试框架
-  - `conftest.py`：pytest 共享 fixtures
-  - `test_data_modules.py`：M1 数据模块测试
-  - `test_model_modules.py`：M2 模型模块测试
-  - `test_correction_modules.py`：M3 校正模块测试
-  - `test_protocol.py`：Pipeline/CV 协议测试
-  - `test_splitters.py`：P-T 划分工具测试
-  - `test_metrics.py`：指标计算测试
+**误差映射规则**：
+- 主量元素（SiO2, Al2O3, FeO, MgO, CaO）：3%
+- 低含量元素（TiO2, MnO, Na2O, Cr2O3, K2O）：8%
 
-### 问题修复
-- **M2 随机种子问题**：`AugmentedDataModule` 添加调用计数器，确保多次调用使用不同随机状态
-- **M4 stratify_labels=None 警告**：`StratifiedCVProtocol` 在未传入分层标签时输出警告日志
-- **m1 重复定义**：`apply_seed` 提取为 `protocol.py` 模块级函数 `_apply_seed()`
-- **m2 viz.py 导入保护**：添加 matplotlib/seaborn 导入保护和可用性检查
-- **m4 前向声明**：`interfaces.py` 使用 `TYPE_CHECKING` 模式处理 Pipeline 类型提示
+### V6.3 - 分析误差传播工具
 
-### 代码清理
-- 移除 `src/data_modules.py` 底部测试代码
-- 移除 `src/model_modules.py` 底部测试代码
-- 移除 `src/correction_modules.py` 底部测试代码
-- 移除 `src/uncertainty_modules.py` 底部测试代码
-- 移除 `src/metrics.py` 底部测试代码
-- 移除 `src/splitters.py` 未使用的 `_ref_split_ratio()` 函数
-- 移除 `src/interfaces.py` 底部冗余的 Pipeline 前向声明
+- 重命名 `run_mc_uncertainty.py` → `run_error_propagation.py`
+- 设计理念：评估 EPMA 分析误差经模型放大后的输出离散度
+- 新增指标：`analysis_std`, `analysis_mad`, `propagated_vs_cv_ratio`
 
-### 接口增强
-- `interfaces.py`：增强 `DataModule` 类 docstring，添加数据契约说明（单位、范围、约束）
-- `protocol.py`：`save_config()` 自动添加版本信息用于结果追溯
-- `requirements.txt`：添加 pytest 依赖和版本锁定建议
+### V6.2 - 稀疏分组合并
 
-### 使用变更
-```bash
-# 运行测试
-pytest tests/ -v
+- 学习曲线与稳定性测试支持稀疏 bins 自动合并
+- 100% 样本使用完整 10 折 CV
 
-# 运行测试（带覆盖率）
-pytest tests/ -v --cov=src
-```
+### V6.1 - 配置集中化
 
-## 2026-01-30（V5.5）
+- `config.py` 成为项目唯一配置来源
+- 新增 CatBoost GPU 控制（`task_type: auto/CPU/GPU`）
 
-**代码质量修复**：
-- 修复 `src/viz.py:656`：箱线图散点绘制 TypeError（list 与 ndarray 相加）
-- 修复 `src/viz.py:906`：热力图 NaN 保护（避免全 NaN 矩阵时 nanargmin 崩溃）
-- 修复 `tools/plot_offline_figures.py`：P-T CV 图添加稀疏 bins 合并和动态 n_splits 降级逻辑
+### V6.0 - 架构重构
 
-## 2026-01-30（V5.4）
+- 新增 `config.py`：集中配置管理 + 版本信息收集
+- 新增 `src/logger.py`：统一日志模块
+- 新增 `tests/`：正式测试框架（7 个测试文件，87 用例）
 
-**学习曲线采样策略优化**：
-- 实现**嵌套采样方案**：小比例样本是大比例的严格子集
-- 改进**稀疏bins合并**：阈值与n_splits对齐，确保分层CV可执行
-- **100% 样本现在使用完整 10 折 CV**（之前因bins稀疏被降级到2折）
-- 学习曲线结果更可靠，与主实验评估口径一致
+---
 
-## 2026-01-30（V5.3）
+## 历史版本摘要
 
-**完整实验重跑**：
-- 使用 V5 实验矩阵完成 24 组实验全量运行
-- E09-E12 现在统一使用 Augmented 数据模块（不再使用 Raw/Balanced）
-- 更新 metrics_summary.csv 和 effect_table.csv
-- **核心结论**：
-  - 最佳配置 E07_ert_augmented_none_liq：T_RMSE=30.69°C, P_RMSE=1.91kbar
-  - Augmented 对所有模型均带来稳定提升
-  - Segmented 校正在 Augmented 基础上仅带来微小改善（T ↓0.3°C）
-  - Stacking 在当前样本量下相比 ERT 无优势
-
-## 2026-01-30（V5.2）
-
-**学习曲线完整实验**：
-- 完成 ERT vs Stacking 学习曲线实验（5个样本比例 × 2模型 × 30次重复 = 300组实验）
-- 配置：`Augmented + Liquid + None`，与最佳配置 E07 对齐
-- 生成 `learning_curve_summary.csv`（汇总统计）和 `learning_curve_runs.csv`（原始数据）
-- 生成学习曲线图 `figures/learning_curve_T.png` 和 `learning_curve_P.png`
-- **核心结论**：ERT 在所有样本量下均优于 Stacking，差距随样本量增加而扩大（+0.5% → +2.4%），确认模型复杂度边界
-
-## 2026-01-28（V5.1）
-
-**论文图件支持**：
-- 新增 5 个绘图函数：`plot_pt_grid_cv_splits`（图3-2）、`plot_feature_set_comparison_boxplot`（图3-3）、`plot_parity_comparison`（图3-4）、`plot_m1_ablation_stepwise`（图3-5）、`plot_performance_heatmap_matrix`（图3-6）
-- 删除冗余函数 `plot_stepwise_rmse_comparison`
-- `plot_offline_figures.py` 更新实验映射，新增图件入口
-
-## 2026-01-28（V5）
-
-**实验矩阵重构**：
-- E09 变更：`Raw+CatBoost+Segmented` → `Augmented+Stacking+None`
-- E10-E12 变更：`Balanced+Segmented` → `Augmented+Segmented`
-- 新增 `run_learning_curve.py` 学习曲线工具
-
-## 2026-01-22（V4.2）
-
-- 完成 24 组实验全量运行
-- 核心结论：Liquid ↓40% RMSE，Augmented ↓3-4°C，ERT 最优
-
-## 2026-01-21（V4/V4.1）
-
-- 重命名 GroupCVProtocol → StratifiedCVProtocol
-- 新增固定测试集指标
-- MC 测试样本数调整为 10
-
-## 2026-01-19（V3）
-
-- M1 对齐 EPMA 误差模型（>1wt% 3%，≤1wt% 8%）
-- M4 使用 EPMA 误差模型，n_mc=1000
-- M3 校正改为 Segmented
-
-## 2026-01-19（V2）
-
-- 新增双特征集支持（NoLiquid/Liquid）
-- 移除 Ref 分组约束，改用 P-T 网格分层
-
-## 2026-01-18（V1）
-
-- 初始版本，12 个基础实验
-- 修复 Windows 兼容性问题
+| 版本   | 日期 | 主要变更 |
+|------|------|----------|
+| V7.1 | 2026-02-02 | 接口清理：移除未使用的 groups 参数、版本号同步至 7.0.0 |
+| V7.0 | 2026-02-02 | 代码审计与清理：移除无效参数、确认架构一致性 |
+| V6.5 | 2026-02-02 | 配置单一源重构、MBE方向统一、随机性修复、参数链路完整传递 |
+| V5.5 | 2026-01-30 | 修复 viz.py 箱线图和热力图 bug |
+| V5.4 | 2026-01-30 | 学习曲线嵌套采样，100% 样本使用完整 10 折 |
+| V5.3 | 2026-01-30 | 24 组实验完整重跑，确认 E07 最佳 |
+| V5.2 | 2026-01-30 | ERT vs Stacking 学习曲线实验（30 重复） |
+| V5.1 | 2026-01-28 | 论文图件函数（图 3-2 至 3-6） |
+| V5.0 | 2026-01-28 | 实验矩阵重构，新增学习曲线工具 |
+| V4.x | 2026-01-21 | StratifiedCVProtocol，固定测试集 |
+| V3   | 2026-01-19 | M1 对齐 EPMA 误差模型，M3 改用 Segmented |
+| V2   | 2026-01-19 | 双特征集支持，P-T 网格分层 |
+| V1   | 2026-01-18 | 初始版本，12 个基础实验 |
 
 ---
 
@@ -758,3 +752,4 @@ Jorgenson et al. (2022). A Machine Learning‐Based Approach to Clinopyroxene Th
 ## License
 
 MIT
+

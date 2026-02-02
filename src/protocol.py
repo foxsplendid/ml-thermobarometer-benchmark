@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # 辅助函数
 # ============================================================
 
-def _apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str, Any]:
+def _apply_seed(params: Dict[str, Any], keys: List[str], seed: int, force: bool = False) -> Dict[str, Any]:
     """
     为参数字典注入随机种子（模块级函数，避免重复定义）
 
@@ -37,6 +37,8 @@ def _apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str,
         要注入的键名列表
     seed : int
         随机种子值
+    force : bool
+        若为 True，则强制覆盖已有的种子值（用于稳定性测试等需要变化种子的场景）
 
     Returns
     -------
@@ -45,15 +47,27 @@ def _apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str,
     """
     updated = dict(params)
     for key in keys:
-        if key not in updated:
+        if force or key not in updated:
             updated[key] = seed
     return updated
 
 
-def _call_pipeline_factory(factory: Callable, seed: int) -> 'Pipeline':
-    """安全调用pipeline factory"""
+def _call_pipeline_factory(factory: Callable, seed: int, fold_idx: int = 0) -> 'Pipeline':
+    """
+    安全调用pipeline factory
+
+    Parameters
+    ----------
+    factory : Callable
+        Pipeline工厂函数
+    seed : int
+        基础随机种子
+    fold_idx : int
+        折索引，用于派生不同折的数据增强种子
+    """
+    effective_seed = seed + fold_idx
     try:
-        return factory(seed)
+        return factory(effective_seed)
     except TypeError:
         return factory()
 
@@ -88,7 +102,6 @@ class Pipeline:
     def fit(self,
             X_train: np.ndarray,
             y_train: np.ndarray,
-            groups_train: np.ndarray,
             stratify_labels: Optional[np.ndarray] = None) -> 'Pipeline':
         """
         训练完整管道
@@ -102,17 +115,9 @@ class Pipeline:
         """
         # 1. 数据处理
         X2, y2, weights, self._state = self.data_module.fit_transform(
-            X_train, y_train, groups_train
+            X_train, y_train
         )
         
-        # 对于增强后的数据，groups 也需要扩展
-        if len(y2) > len(groups_train):
-            # 增强模块会扩展样本数
-            n_aug = len(y2) // len(groups_train)
-            groups2 = np.tile(groups_train, n_aug)
-        else:
-            groups2 = groups_train
-
         if stratify_labels is not None:
             if len(y2) > len(stratify_labels):
                 n_aug = len(y2) // len(stratify_labels)
@@ -123,7 +128,7 @@ class Pipeline:
             stratify2 = None
         
         # 2. 模型训练
-        self._model = self.model_module.fit(X2, y2, weights, groups2, stratify_labels=stratify2)
+        self._model = self.model_module.fit(X2, y2, weights, stratify_labels=stratify2)
         
         self._is_fitted = True
         return self
@@ -228,8 +233,9 @@ def compute_all_metrics(y_true: np.ndarray,
     # 基础指标
     metrics['rmse'] = np.sqrt(mean_squared_error(y_true, y_pred))
     metrics['mae'] = mean_absolute_error(y_true, y_pred)
-    metrics['mbe'] = np.mean(y_pred - y_true)  # Mean Bias Error
-    
+    # MBE: 正值表示预测偏低（y_true > y_pred），负值表示预测偏高（y_true < y_pred）
+    metrics['mbe'] = np.mean(y_true - y_pred)
+
     # R²
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
@@ -251,8 +257,9 @@ def compute_all_metrics(y_true: np.ndarray,
     if y_pred_raw is not None:
         metrics['rmse_raw'] = np.sqrt(mean_squared_error(y_true, y_pred_raw))
         metrics['mae_raw'] = mean_absolute_error(y_true, y_pred_raw)
-        metrics['mbe_raw'] = np.mean(y_pred_raw - y_true)
-        
+        # MBE_raw: 与 MBE 方向一致，正值表示预测偏低
+        metrics['mbe_raw'] = np.mean(y_true - y_pred_raw)
+
         if len(y_pred_raw) > 2 and np.std(y_pred_raw) > 1e-10:
             reg_raw = linregress(y_pred_raw, y_true)
             metrics['slope_raw'] = reg_raw.slope
@@ -272,7 +279,8 @@ def compute_all_metrics(y_true: np.ndarray,
                 
                 if np.sum(mask) >= 3:
                     metrics[f'mae_bin{i}'] = mean_absolute_error(y_true[mask], y_pred[mask])
-                    metrics[f'mbe_bin{i}'] = np.mean(y_pred[mask] - y_true[mask])
+                    # 分箱 MBE: 与整体 MBE 方向一致
+                    metrics[f'mbe_bin{i}'] = np.mean(y_true[mask] - y_pred[mask])
         except Exception:
             pass
     
@@ -281,23 +289,63 @@ def compute_all_metrics(y_true: np.ndarray,
 
 # 分层 CV 辅助函数
 
-def _merge_sparse_bins(labels: np.ndarray, min_samples_per_bin: int) -> np.ndarray:
-    """合并稀疏 bins，确保每个 bin 有足够样本数"""
+def _merge_sparse_bins(labels: np.ndarray,
+                       min_samples_per_bin: int,
+                       verbose: bool = False) -> np.ndarray:
+    """
+    合并稀疏 bins，确保每个 bin 有足够样本数
+
+    合并策略：将稀疏 bin 合并到最近的非稀疏 bin（基于整数标签距离）
+
+    注意：整数标签距离近似 P-T 空间邻近性，因为 bin 标签由 P-T 网格生成。
+    对于极端稀疏的数据分布，合并可能跨越较大的 P-T 空间，但实际影响有限。
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        原始 bin 标签
+    min_samples_per_bin : int
+        每个 bin 的最小样本数
+    verbose : bool
+        是否输出诊断信息
+
+    Returns
+    -------
+    np.ndarray
+        合并后的 bin 标签
+    """
     unique_bins, bin_counts = np.unique(labels, return_counts=True)
     merged = labels.copy()
 
     sparse_bins = unique_bins[bin_counts < min_samples_per_bin]
     if sparse_bins.size == 0:
+        if verbose:
+            logger.debug(f"Bin merge: no sparse bins (min_samples={min_samples_per_bin}), "
+                        f"{len(unique_bins)} bins unchanged")
         return merged
 
     non_sparse_bins = unique_bins[bin_counts >= min_samples_per_bin]
     if non_sparse_bins.size == 0:
+        if verbose:
+            logger.warning(f"Bin merge: all {len(unique_bins)} bins are sparse, "
+                          f"collapsing to single bin")
         return np.zeros_like(labels)
 
+    merge_map = {}  # 记录合并映射用于诊断
     for sparse_bin in sparse_bins:
         distances = np.abs(non_sparse_bins - sparse_bin)
         nearest_bin = non_sparse_bins[np.argmin(distances)]
         merged[labels == sparse_bin] = nearest_bin
+        merge_map[int(sparse_bin)] = int(nearest_bin)
+
+    if verbose:
+        n_merged = len(sparse_bins)
+        n_remaining = len(non_sparse_bins)
+        logger.info(f"Bin merge: {n_merged} sparse bins → {n_remaining} bins "
+                   f"(threshold={min_samples_per_bin})")
+        if n_merged <= 10:  # 只显示少量合并详情
+            for src, dst in merge_map.items():
+                logger.debug(f"  bin {src} → {dst}")
 
     return merged
 
@@ -324,9 +372,10 @@ class StratifiedCVProtocol:
     主协议：Stratified K-Fold 交叉验证
     
     核心约束：
-    - 按文献来源（group_id）分组
-    - 同一组的样本不能同时出现在训练集和验证集
+    - 使用 P-T 分箱进行分层采样（stratify_labels）
+    - 确保每折的 P-T 分布与整体一致
     - 所有拟合操作只在训练折进行
+
     """
     
     def __init__(self,
@@ -338,7 +387,6 @@ class StratifiedCVProtocol:
     def run(self,
             X: np.ndarray,
             y: np.ndarray,
-            groups: np.ndarray,
             pipeline_factory: Callable[..., Pipeline],
             uncertainty_module: Optional[UncertaintyModule] = None,
             corr_module: Optional[CorrectionModule] = None,
@@ -353,8 +401,6 @@ class StratifiedCVProtocol:
             特征矩阵（原始，未标准化）
         y : np.ndarray
             目标值
-        groups : np.ndarray
-            分组标签
         pipeline_factory : Callable
             返回新 Pipeline 实例的工厂函数
         uncertainty_module : UncertaintyModule, optional
@@ -372,8 +418,6 @@ class StratifiedCVProtocol:
                 'uncertainty': dict or None,   # 不确定性结果
             }
         """
-        # 使用StratifiedKFold（不再使用GroupKFold）
-        # 注意：移除Ref分组约束，优先保证P-T分布平衡
         if stratify_labels is None:
             logger.warning(
                 "stratify_labels=None: 使用普通 KFold 而非 StratifiedKFold，"
@@ -405,12 +449,12 @@ class StratifiedCVProtocol:
 
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
-            groups_train = groups[train_idx]
             stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
 
-            pipeline = _call_pipeline_factory(pipeline_factory, self.random_seed)
+            # 传入 fold_idx 确保不同折使用不同的数据增强种子
+            pipeline = _call_pipeline_factory(pipeline_factory, self.random_seed, fold_idx)
 
-            pipeline.fit(X_train, y_train, groups_train, stratify_labels=stratify_train)
+            pipeline.fit(X_train, y_train, stratify_labels=stratify_train)
 
             X_val_scaled, _ = pipeline.data_module.transform(X_val, pipeline._state)
             y_pred_raw = pipeline.predict(X_val_scaled, apply_correction=False)
@@ -454,7 +498,10 @@ class StratifiedCVProtocol:
                 pipeline = record['pipeline']
                 pipeline.set_correction(corr_module, corr_model)
 
-                dist = uncertainty_module.predict_distribution(pipeline, record['X_val'])
+                # 传入 fold_idx 确保各折使用不同的随机序列
+                dist = uncertainty_module.predict_distribution(
+                    pipeline, record['X_val'], fold_idx=record['fold_id']
+                )
                 y_pred_corr = dist.get('median', y_pred_corr)
 
                 calib_metrics = uncertainty_module.compute_calibration_metrics(record['y_val'], dist)
@@ -508,67 +555,6 @@ class StratifiedCVProtocol:
         }
 
 # ============================================================
-# Random Split Protocol（对照协议）
-# ============================================================
-
-class RandomSplitProtocol:
-    """
-    对照协议：随机划分
-    
-    用于评估随机划分带来的乐观偏差
-    """
-    
-    def __init__(self,
-                 test_size: float = 0.2,
-                 n_repeats: int = 5,
-                 random_seed: int = 42):
-        self.test_size = test_size
-        self.n_repeats = n_repeats
-        self.random_seed = random_seed
-    
-    def run(self,
-            X: np.ndarray,
-            y: np.ndarray,
-            groups: np.ndarray,
-            pipeline_factory: Callable[[], Pipeline],
-            verbose: bool = True) -> Dict[str, Any]:
-        """
-        执行随机划分验证
-        """
-        repeat_metrics = []
-        
-        for i in range(self.n_repeats):
-            if verbose:
-                print(f"  Repeat {i + 1}/{self.n_repeats}: ", end="")
-            
-            # 随机划分
-            X_train, X_val, y_train, y_val, g_train, _ = train_test_split(
-                X, y, groups,
-                test_size=self.test_size,
-                random_state=self.random_seed + i
-            )
-            
-            # 训练并预测
-            pipeline = pipeline_factory()
-            pipeline.fit(X_train, y_train, g_train)
-            
-            X_val_scaled, _ = pipeline.data_module.transform(X_val, pipeline._state)
-            y_pred = pipeline.predict(X_val_scaled)
-            
-            # 计算指标
-            metrics = compute_all_metrics(y_val, y_pred)
-            metrics['repeat_id'] = i
-            repeat_metrics.append(metrics)
-            
-            if verbose:
-                print(f"RMSE={metrics['rmse']:.3f}")
-        
-        return {
-            'repeat_metrics': pd.DataFrame(repeat_metrics),
-            'summary': summarize_folds(repeat_metrics),
-        }
-
-# ============================================================
 # 实验矩阵执行器
 # ============================================================
 
@@ -583,8 +569,9 @@ class ExperimentConfig:
     data_params: Dict = field(default_factory=dict)
     model_params: Dict = field(default_factory=dict)
     corr_params: Dict = field(default_factory=dict)
+    # M4 不确定性参数：n_mc, percentiles, feature_names 等
+    uncertainty_params: Dict = field(default_factory=dict)
     run_uncertainty: bool = False  # 是否运行 M4
-    run_random_split: bool = False # 是否运行对照
 
 class ExperimentMatrix:
     """
@@ -597,7 +584,6 @@ class ExperimentMatrix:
                  X: np.ndarray,
                  y_T: np.ndarray,
                  y_P: np.ndarray,
-                 groups: np.ndarray,
                  output_dir: str = 'results',
                  target_names: Tuple[str, str] = ('T', 'P')):
         """
@@ -609,8 +595,6 @@ class ExperimentMatrix:
             温度目标
         y_P : np.ndarray
             压力目标
-        groups : np.ndarray
-            分组标签
         output_dir : str
             输出目录
         target_names : tuple
@@ -619,7 +603,6 @@ class ExperimentMatrix:
         self.X = X
         self.y_T = y_T
         self.y_P = y_P
-        self.groups = groups
         self.output_dir = output_dir
         self.target_names = target_names
         
@@ -673,9 +656,24 @@ class ExperimentMatrix:
 
             pipeline_factory = make_pipeline_factory(config)
             
-            # 不确定性模块
-            unc_module = MCUncertaintyEstimator(random_seed=random_seed) if config.run_uncertainty else None
-            
+            # 不确定性模块（从 config.uncertainty_params 读取参数）
+            unc_module = None
+            if config.run_uncertainty:
+                unc_params = {}
+                try:
+                    from config import CONFIG as APP_CONFIG
+                    unc_params.update({
+                        'n_mc': APP_CONFIG.uncertainty.n_mc,
+                        'percentiles': APP_CONFIG.uncertainty.percentiles,
+                    })
+                except Exception:
+                    pass
+
+                if config.uncertainty_params:
+                    unc_params.update(config.uncertainty_params)
+                unc_params.setdefault('random_seed', random_seed)
+                unc_module = MCUncertaintyEstimator(**unc_params)
+
             # 运行两个目标（T 和 P）
             exp_result = {
                 'exp_id': config.exp_id,
@@ -692,7 +690,7 @@ class ExperimentMatrix:
                 protocol = StratifiedCVProtocol(n_splits=n_splits, random_seed=random_seed)
                 corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
                 results = protocol.run(
-                    self.X, y, self.groups,
+                    self.X, y,
                     pipeline_factory,
                     uncertainty_module=unc_module,
                     corr_module=corr_module,
@@ -718,7 +716,7 @@ class ExperimentMatrix:
                 os.makedirs(models_dir, exist_ok=True)
 
                 full_pipeline = _call_pipeline_factory(pipeline_factory, random_seed)
-                full_pipeline.fit(self.X, y, self.groups, stratify_labels=stratify_labels)
+                full_pipeline.fit(self.X, y, stratify_labels=stratify_labels)
                 full_pipeline.set_correction(results['corr_module'], results['corr_model'])
 
                 model_path = os.path.join(models_dir, f'{config.exp_id}_{target_name}_model.joblib')
@@ -732,7 +730,7 @@ class ExperimentMatrix:
                         'data_module': config.data_module_name,
                         'model_module': config.model_module_name,
                         'corr_module': config.corr_module_name,
-                        'feature_set': config.feature_set,  # 新增：特征集名称，供离线绘图获取特征名
+                        'feature_set': config.feature_set,  # 特征集名称，供离线绘图获取特征名
                     },
                 }, model_path)
 
@@ -748,20 +746,7 @@ class ExperimentMatrix:
                 # 汇总到结果
                 for k, v in results['summary'].items():
                     exp_result[f'{target_name}_{k}'] = v
-                
-                # 对照协议（如果需要）
-                if config.run_random_split:
-                    print(f"\n  [对照] Random Split:")
-                    random_protocol = RandomSplitProtocol()
-                    random_results = random_protocol.run(
-                        self.X, y, self.groups,
-                        pipeline_factory,
-                        verbose=verbose
-                    )
-                    
-                    for k, v in random_results['summary'].items():
-                        exp_result[f'{target_name}_random_{k}'] = v
-            
+
             all_results.append(exp_result)
         
         # 汇总 DataFrame
@@ -787,7 +772,7 @@ class ExperimentMatrix:
                               n_splits: int = 10,
                               test_size: float = 0.3,
                               n_repeats: int = 1000,
-                              checkpoint_interval: int = 100,
+                              checkpoint_interval: int = 20,
                               random_seed: int = 0,
                               resume: bool = False,
                               repeat_start: int = 0,
@@ -821,9 +806,9 @@ class ExperimentMatrix:
                 def factory(seed: Optional[int] = None):
                     seed_value = random_seed if seed is None else seed
 
-                    # 统一使用 random_seed 参数（模型内部自行转换为 sklearn 的 random_state）
-                    data_params = _apply_seed(cfg.data_params, ['random_seed'], seed_value)
-                    model_params = _apply_seed(cfg.model_params, ['random_seed'], seed_value)
+                    # 稳定性测试需要变化种子，使用 force=True 强制覆盖配置中的固定种子
+                    data_params = _apply_seed(cfg.data_params, ['random_seed'], seed_value, force=True)
+                    model_params = _apply_seed(cfg.model_params, ['random_seed'], seed_value, force=True)
 
                     data_mod = get_data_module(cfg.data_module_name, **data_params)
                     model_mod = get_model_module(cfg.model_module_name, **model_params)
@@ -849,14 +834,22 @@ class ExperimentMatrix:
                     if os.path.exists(test_metrics_path):
                         latest_path = test_metrics_path
                     else:
-                        pattern = re.compile(
+                        # 匹配新格式 xxx_checkpoint_task00020.csv 和旧格式 xxx_checkpoint_123.csv
+                        pattern_new = re.compile(
+                            rf"{re.escape(config.exp_id)}_{target_name}_checkpoint{re.escape(segment_suffix)}_task(\d+)\.csv"
+                        )
+                        pattern_old = re.compile(
                             rf"{re.escape(config.exp_id)}_{target_name}_checkpoint{re.escape(segment_suffix)}_(\d+)\.csv"
                         )
                         checkpoints = []
                         for fname in os.listdir(stability_dir):
-                            m = pattern.match(fname)
+                            m = pattern_new.match(fname)
                             if m:
                                 checkpoints.append((int(m.group(1)), fname))
+                            else:
+                                m = pattern_old.match(fname)
+                                if m:
+                                    checkpoints.append((int(m.group(1)), fname))
                         if checkpoints:
                             checkpoints.sort()
                             latest_path = os.path.join(stability_dir, checkpoints[-1][1])
@@ -883,15 +876,32 @@ class ExperimentMatrix:
                 total_repeats = repeat_end - repeat_start + 1
                 if start_repeat > repeat_end and verbose:
                     print(f"  Resume {target_name}: segment already complete")
-            
+
+                # 预先计算用于子采样的 stratify labels（需要合并稀疏 bin 以避免划分失败）
+                if stratify_labels is not None:
+                    # 子采样需要较宽松的 min_samples（至少2个样本才能划分）
+                    subsample_stratify = _merge_sparse_bins(stratify_labels, min_samples_per_bin=2)
+                else:
+                    subsample_stratify = None
+
                 for i in range(start_repeat, repeat_end + 1):
                     seed = random_seed + i
-                    train_idx, _ = train_test_split(
-                        idx_all,
-                        test_size=test_size,
-                        random_state=seed
-                    )
-            
+
+                    # 使用 stratify 约束子采样，保证训练子集的 P-T 分布与整体一致
+                    if subsample_stratify is not None:
+                        train_idx, _ = train_test_split(
+                            idx_all,
+                            test_size=test_size,
+                            random_state=seed,
+                            stratify=subsample_stratify
+                        )
+                    else:
+                        train_idx, _ = train_test_split(
+                            idx_all,
+                            test_size=test_size,
+                            random_state=seed
+                        )
+
                     X_train = self.X[train_idx]
                     y_train = y_full[train_idx]
                     groups_train = self.groups[train_idx]
@@ -937,12 +947,12 @@ class ExperimentMatrix:
                     if checkpoint_interval > 0 and (current_idx % checkpoint_interval) == 0:
                         checkpoint_df = pd.DataFrame(repeat_metrics)
                         checkpoint_path = os.path.join(
-                            stability_dir, f'{config.exp_id}_{target_name}_checkpoint{segment_suffix}_{i+1}.csv'
+                            stability_dir, f'{config.exp_id}_{target_name}_checkpoint{segment_suffix}_task{current_idx:05d}.csv'
                         )
                         checkpoint_df.to_csv(checkpoint_path, index=False)
                         if verbose:
-                            print(f"  Checkpoint saved at repeat {i+1} -> {checkpoint_path}")
-            
+                            print(f"  Checkpoint saved at task {current_idx} -> {os.path.basename(checkpoint_path)}")
+
                 repeat_df = pd.DataFrame(repeat_metrics)
                 repeat_df.to_csv(test_metrics_path, index=False)
             

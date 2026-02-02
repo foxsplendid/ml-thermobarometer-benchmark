@@ -2,7 +2,7 @@
 """
 Chapter 3 Benchmark Protocol - 模块导出
 
-机器学习温压计模块化验证框架 v2.0
+机器学习温压计模块化验证框架 v6.0
 """
 
 # ============================================================
@@ -62,12 +62,21 @@ from .uncertainty_modules import (
 )
 
 # ============================================================
+# 扰动模块（共用于数据增强和误差传播）
+# ============================================================
+from .perturbation import (
+    get_rel_err_vector,
+    epma_perturb,
+    perturbation_with_repeats,
+    DEFAULT_OXIDE_REL_ERR,
+)
+
+# ============================================================
 # Protocol
 # ============================================================
 from .protocol import (
     Pipeline,
     StratifiedCVProtocol,
-    RandomSplitProtocol,
     ExperimentConfig,
     ExperimentMatrix,
     compute_all_metrics,
@@ -89,5 +98,5 @@ from .metrics import (
 # ============================================================
 # 版本信息
 # ============================================================
-__version__ = '2.0.0'
+__version__ = '7.0.0'
 __author__ = 'ML Thermobarometer Benchmark Protocol'

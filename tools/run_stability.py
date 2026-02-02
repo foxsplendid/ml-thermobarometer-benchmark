@@ -4,8 +4,18 @@
 稳定性测试工具 - 评估模型在不同随机划分下的性能稳定性
 
 功能：
-    对固定测试集进行多次随机训练集划分，评估模型性能的稳定性
-    输出 RMSE/R² 的均值、标准差、置信区间
+    评估模型对训练数据随机子采样的敏感性，量化性能波动范围。
+
+    实现语义（非 MC-CV）：
+    1. 对训练集进行分层子采样（保持 P-T 分布一致）
+    2. 在子采样数据上进行 CV 拟合校正器
+    3. 训练最终模型
+    4. 在固定测试集上评估
+
+    每次重复使用不同的随机种子，影响：
+    - 训练集子采样的随机性
+    - 模型内部的随机性（如树的随机分裂）
+    - CV 折划分的随机性
 
 使用方法：
 
@@ -39,8 +49,9 @@
 
 Notes:
 - 使用固定的 hold-out 测试集（由 prepare_splits 生成）
-- 每次重复使用不同的随机种子划分训练集
-- 检查点默认每 100 次保存，支持中断后恢复
+- 每次重复使用不同的随机种子（影响模型、子采样、CV划分）
+- 子采样使用分层采样，保持 P-T 分布与整体一致
+- 检查点默认每 20 次保存，支持中断后恢复
 """
 import argparse
 import glob
@@ -144,12 +155,10 @@ def _run_stability(config: ExperimentConfig,
                    X_train: np.ndarray,
                    y_T_train: np.ndarray,
                    y_P_train: np.ndarray,
-                   groups_train: np.ndarray,
                    tp_bins_train: np.ndarray,
                    X_test: np.ndarray,
                    y_T_test: np.ndarray,
                    y_P_test: np.ndarray,
-                   groups_test: np.ndarray,
                    output_dir: str,
                    n_splits: int,
                    n_repeats: int,
@@ -159,13 +168,12 @@ def _run_stability(config: ExperimentConfig,
                    write_summary: bool,
                    test_size: float,
                    checkpoint_interval: int,
-                   seed_start: int,
+                   random_seed: int,
                    resume: bool) -> None:
     matrix = ExperimentMatrix(
         X=X_train,
         y_T=y_T_train,
         y_P=y_P_train,
-        groups=groups_train,
         output_dir=output_dir,
     )
     matrix.run_stability_repeats(
@@ -173,7 +181,6 @@ def _run_stability(config: ExperimentConfig,
         X_test=X_test,
         y_T_test=y_T_test,
         y_P_test=y_P_test,
-        groups_test=groups_test,
         stratify_labels=tp_bins_train,
         n_splits=n_splits,
         test_size=test_size,
@@ -183,7 +190,7 @@ def _run_stability(config: ExperimentConfig,
         segment_tag=segment_tag,
         write_summary=write_summary,
         checkpoint_interval=checkpoint_interval,
-        random_seed=seed_start,
+        random_seed=random_seed,
         resume=resume,
         verbose=True,
     )
@@ -224,7 +231,8 @@ Examples:
     parser.add_argument("--data-path", default=BASE_CONFIG["data_path"])
     parser.add_argument("--output-dir", default=BASE_CONFIG["output_dir"])
     parser.add_argument("--n-splits", type=int, default=BASE_CONFIG["n_splits"])
-    parser.add_argument("--random-seed", type=int, default=BASE_CONFIG["random_seed"])
+    parser.add_argument("--random-seed", type=int, default=BASE_CONFIG["random_seed"],
+                        help="base seed for repeats (base + repeat_id)")
     
     # 稳定性测试参数（使用硬编码默认值，因main.py已移除相关配置）
     parser.add_argument("--n-repeats", type=int, default=1000,
@@ -237,10 +245,8 @@ Examples:
                         help="merge segments and finalize summary")
     parser.add_argument("--stability-test-size", type=float, default=0.3,
                         help="stability test size (default: 0.3)")
-    parser.add_argument("--stability-seed-start", type=int, default=0,
-                        help="seed start for stability repeats (default: 0)")
-    parser.add_argument("--checkpoint-interval", type=int, default=100,
-                        help="checkpoint interval in repeats (default: 100)")
+    parser.add_argument("--checkpoint-interval", type=int, default=20,
+                        help="checkpoint interval in repeats (default: 20)")
     parser.add_argument("--resume", action="store_true",
                         help="resume from latest checkpoint/test_metrics")
 
@@ -295,10 +301,10 @@ Examples:
     load_config['data_path'] = args.data_path
     load_config['output_dir'] = args.output_dir
 
-    X, y_T, y_P, groups = load_data(load_config, feature_set=args.feature_set)
+    X, y_T, y_P = load_data(load_config, feature_set=args.feature_set)
 
     split_config = {'random_seed': args.random_seed}
-    split = prepare_splits(X, y_T, y_P, groups, split_config)
+    split = prepare_splits(X, y_T, y_P, split_config)
 
     train_idx = split["train_idx"]
     test_idx = split["test_idx"]
@@ -307,12 +313,10 @@ Examples:
     X_train = X[train_idx]
     y_T_train = y_T[train_idx]
     y_P_train = y_P[train_idx]
-    groups_train = groups[train_idx]
 
     X_test = X[test_idx]
     y_T_test = y_T[test_idx]
     y_P_test = y_P[test_idx]
-    groups_test = groups[test_idx]
 
     _ensure_dir(args.output_dir)
 
@@ -325,8 +329,8 @@ Examples:
             print(f"\nRunning stability repeats: {args.n_repeats}")
         _run_stability(
             config,
-            X_train, y_T_train, y_P_train, groups_train, tp_bins_train,
-            X_test, y_T_test, y_P_test, groups_test,
+            X_train, y_T_train, y_P_train, tp_bins_train,
+            X_test, y_T_test, y_P_test,
             args.output_dir,
             args.n_splits,
             args.n_repeats,
@@ -336,7 +340,7 @@ Examples:
             (not segmented),
             args.stability_test_size,
             args.checkpoint_interval,
-            args.stability_seed_start,
+            args.random_seed,
             args.resume,
         )
 
