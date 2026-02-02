@@ -7,7 +7,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import numpy as np
 
 # 避免循环导入
@@ -25,6 +25,7 @@ class DataModuleState:
     scaler: Any = None                     # StandardScaler 实例
     bin_edges: Optional[np.ndarray] = None # 分箱边界
     feature_std: Optional[np.ndarray] = None # 原始特征标准差（用于MC增强）
+    feature_names: Optional[List[str]] = None  # 特征列名（用于绘图/MC）
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -56,12 +57,39 @@ class DataModule(ABC):
     - 输出 X: 标准化后，均值≈0，标准差≈1
     - 输出 sample_weights: 非负，总和≈n_samples
     """
-    
+
+    def _infer_feature_names(self, n_features: int, feature_names: Optional[List[str]] = None) -> List[str]:
+        """
+        根据特征数推断特征名列表（基类通用方法）
+
+        Parameters
+        ----------
+        n_features : int
+            特征数量
+        feature_names : List[str], optional
+            已指定的特征名列表，优先使用
+
+        Returns
+        -------
+        List[str]
+            特征名列表
+        """
+        if feature_names is not None:
+            return feature_names
+        # 根据特征数推断特征集类型
+        if n_features == 18:
+            from config import DataConfig
+            return DataConfig().feature_sets['Liquid']
+        elif n_features == 9:
+            from config import DataConfig
+            return DataConfig().feature_sets['NoLiquid']
+        else:
+            return [f'feature_{i}' for i in range(n_features)]
+
     @abstractmethod
     def fit_transform(self, 
                       X_train: np.ndarray, 
-                      y_train: np.ndarray, 
-                      groups_train: np.ndarray
+                      y_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """
         在训练折上拟合并转换
@@ -72,8 +100,6 @@ class DataModule(ABC):
             训练集特征
         y_train : np.ndarray, shape (n_train,)
             训练集目标
-        groups_train : np.ndarray, shape (n_train,)
-            训练集分组标签
             
         Returns
         -------
@@ -128,11 +154,10 @@ class ModelModule(ABC):
     职责：
     - 模型训练
     - 预测
-    - OOF 预测生成（用于偏差校正）
-    
+
     防泄露约束：
     - fit() 只使用训练集数据
-    - get_oof_predictions() 必须通过 inner CV 生成，禁止使用 in-sample 预测
+    - 校正器拟合在协议层完成，使用全局 OOF 预测
     """
     
     @abstractmethod
@@ -140,7 +165,6 @@ class ModelModule(ABC):
             X_train: np.ndarray,
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
         """
         训练模型
@@ -153,8 +177,8 @@ class ModelModule(ABC):
             训练集目标
         sample_weights : np.ndarray, optional
             样本权重
-        groups : np.ndarray, optional
-            分组标签（Stacking 内层 CV 可能需要）
+        stratify_labels : np.ndarray, optional
+            分层标签（Stacking 内层 CV 使用）
             
         Returns
         -------
@@ -181,48 +205,6 @@ class ModelModule(ABC):
             预测值
         """
         pass
-    
-    def get_oof_predictions(self,
-                            model: Any,
-                            X_train: np.ndarray,
-                            y_train: np.ndarray,
-                            groups: Optional[np.ndarray] = None,
-                            sample_weights: Optional[np.ndarray] = None,
-                            stratify_labels: Optional[np.ndarray] = None
-                            ) -> np.ndarray:
-        """
-        获取训练集 OOF 预测（用于偏差校正器拟合）
-
-        默认实现：返回 in-sample 预测（非严格 OOF）
-
-        【地质学ML传统做法说明】
-        在地质学机器学习领域，传统做法是在外层划分基础上使用内层CV进行模型训练，
-        但偏差校正器通常直接使用in-sample预测而非严格OOF预测。这种做法在实践中
-        风险较低（对于简单模型如ERT、CatBoost），但理论上可能导致校正器轻微过拟合。
-
-        StrictOOFStacking模型会重写此方法，返回真正的inner OOF预测。
-
-        Parameters
-        ----------
-        model : Any
-            训练好的模型
-        X_train : np.ndarray
-            训练集特征
-        y_train : np.ndarray
-            训练集目标
-        groups : np.ndarray, optional
-            分组标签（已废弃，保留向后兼容）
-        sample_weights : np.ndarray, optional
-            样本权重
-        stratify_labels : np.ndarray, optional
-            分层标签（用于内层CV，如有）
-
-        Returns
-        -------
-        y_oof : np.ndarray
-            OOF预测（默认实现返回in-sample预测）
-        """
-        return self.predict(model, X_train)
     
     def get_name(self) -> str:
         """返回模块名称"""

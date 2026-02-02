@@ -19,6 +19,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from src.protocol import _merge_sparse_bins
 from src.viz import (
     plot_pred_vs_true,
     plot_residuals,
@@ -359,27 +360,6 @@ def _plot_heatmap_matrix(results_dir: str, fig_dir: str) -> None:
             print(f"skip: performance_heatmap_{target} error: {e}")
 
 
-def _merge_sparse_bins_for_cv(labels: np.ndarray, min_samples: int = 10) -> np.ndarray:
-    """合并稀疏 bins，确保每个 bin 至少有 min_samples 个样本"""
-    unique_bins, bin_counts = np.unique(labels, return_counts=True)
-    merged_labels = labels.copy()
-
-    sparse_bins = unique_bins[bin_counts < min_samples]
-    if len(sparse_bins) == 0:
-        return merged_labels
-
-    non_sparse_bins = unique_bins[bin_counts >= min_samples]
-    if len(non_sparse_bins) == 0:
-        # 所有 bin 都稀疏，合并为一个
-        return np.zeros_like(labels)
-
-    for sparse_bin in sparse_bins:
-        distances = np.abs(non_sparse_bins - sparse_bin)
-        nearest_bin = non_sparse_bins[np.argmin(distances)]
-        merged_labels[labels == sparse_bin] = nearest_bin
-
-    return merged_labels
-
 
 def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> None:
     """图 3-2：P-T 空间网格分层 CV 示意图"""
@@ -399,7 +379,7 @@ def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Non
 
         # 合并稀疏 bins 以支持分层 CV
         n_splits = 10
-        merged_labels = _merge_sparse_bins_for_cv(tp_labels, min_samples=n_splits)
+        merged_labels = _merge_sparse_bins(tp_labels, min_samples_per_bin=n_splits)
 
         # 检查最小 bin 样本数，必要时降级 n_splits
         _, bin_counts = np.unique(merged_labels, return_counts=True)

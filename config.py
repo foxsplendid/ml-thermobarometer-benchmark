@@ -52,6 +52,10 @@ class DataConfig:
     })
 
 
+# 注意：EPMA 误差配置已统一由 src/perturbation.py 管理
+# 详见 perturbation.py::DEFAULT_OXIDE_REL_ERR 和 get_rel_err_vector()
+
+
 @dataclass
 class CVConfig:
     """交叉验证配置"""
@@ -81,17 +85,41 @@ class CatBoostConfig:
 
 @dataclass
 class ModelDefaults:
-    """模型默认参数"""
+    """
+    模型默认参数 - 经过实验调优的设计值
+
+    ⚠️ 警告：这些参数基于 Chapter 3 实验验证，不建议随意修改。
+    修改可能导致：
+    - 性能下降（特别是 max_depth、n_estimators）
+    - 训练时间显著变化
+    - 与论文结果不可复现
+
+    如需调参，建议：
+    1. 先在小数据集上验证
+    2. 使用学习曲线工具评估影响
+    3. 记录修改原因和结果对比
+    """
+    # ExtraTrees 参数（集成基线，高方差低偏差）
     ert: Dict[str, Any] = field(default_factory=lambda: {
-        'n_estimators': 200,
-        'max_depth': 15,
-        'min_samples_split': 5,
+        'n_estimators': 200,      # 树的数量，增加可提高稳定性但增加训练时间
+        'max_depth': 15,          # 最大深度，过深易过拟合
+        'min_samples_split': 5,   # 最小分裂样本数
     })
+
+    # CatBoost 参数（强单模型，Boosting 方法）
     catboost: CatBoostConfig = field(default_factory=CatBoostConfig)
+
+    # Stacking 参数（元学习集成）
     stacking: Dict[str, Any] = field(default_factory=lambda: {
-        'inner_cv': 5,
-        'use_meta_scaler': True,
+        'inner_cv': 5,            # 内层 CV 折数，用于生成元特征
+        'use_meta_scaler': True,  # 元特征标准化
     })
+
+    # Stacking 基模型参数覆盖（可选，默认使用 ert/catboost/rf 的参数）
+    # 格式：{'ert': {...}, 'catboost': {...}, 'rf': {...}}
+    stacking_base_defaults: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    # RandomForest 参数（经典集成，作为 Stacking 基学习器）
     rf: Dict[str, Any] = field(default_factory=lambda: {
         'n_estimators': 200,
         'max_depth': 15,
@@ -102,12 +130,10 @@ class ModelDefaults:
 @dataclass
 class AugmentationConfig:
     """数据增强配置（EPMA误差模型）"""
-    n_aug: int = 15
-    error_model: str = 'epma'
-    rel_err_high: float = 0.03      # >1 wt% 使用 3% 误差
-    rel_err_low: float = 0.08       # ≤1 wt% 使用 8% 误差
-    error_threshold: float = 1.0    # wt% 阈值
-    clip_min: float = 0.0           # 最小值裁剪
+    n_aug: int = 15              # 每个原始样本生成的增强副本数
+    error_model: str = 'epma'    # 误差模型类型
+    # 注：具体误差参数由 src/perturbation.py 管理
+
 
 
 @dataclass
@@ -175,6 +201,34 @@ def load_config(config_path: Optional[str] = None) -> Config:
                     for k, v in yaml_config['output'].items():
                         if hasattr(config.output, k):
                             setattr(config.output, k, v)
+
+                # 覆盖模型配置
+                if 'model' in yaml_config:
+                    model_cfg = yaml_config['model']
+                    if 'ert' in model_cfg and isinstance(model_cfg['ert'], dict):
+                        config.model.ert.update(model_cfg['ert'])
+                    if 'rf' in model_cfg and isinstance(model_cfg['rf'], dict):
+                        config.model.rf.update(model_cfg['rf'])
+                    if 'stacking' in model_cfg and isinstance(model_cfg['stacking'], dict):
+                        config.model.stacking.update(model_cfg['stacking'])
+                    if 'stacking_base_defaults' in model_cfg and isinstance(model_cfg['stacking_base_defaults'], dict):
+                        config.model.stacking_base_defaults = model_cfg['stacking_base_defaults']
+                    if 'catboost' in model_cfg and isinstance(model_cfg['catboost'], dict):
+                        for k, v in model_cfg['catboost'].items():
+                            if hasattr(config.model.catboost, k):
+                                setattr(config.model.catboost, k, v)
+
+                # 覆盖增强配置
+                if 'augmentation' in yaml_config:
+                    for k, v in yaml_config['augmentation'].items():
+                        if hasattr(config.augmentation, k):
+                            setattr(config.augmentation, k, v)
+
+                # 覆盖不确定性配置
+                if 'uncertainty' in yaml_config:
+                    for k, v in yaml_config['uncertainty'].items():
+                        if hasattr(config.uncertainty, k):
+                            setattr(config.uncertainty, k, v)
         except Exception as e:
             print(f"警告: 加载配置文件失败 ({e})，使用默认配置")
 
@@ -257,31 +311,6 @@ def get_version_info() -> Dict[str, Any]:
 # 辅助函数
 # ============================================================
 
-def apply_seed(params: Dict[str, Any], keys: List[str], seed: int) -> Dict[str, Any]:
-    """
-    为参数字典注入随机种子
-
-    Parameters
-    ----------
-    params : Dict[str, Any]
-        原始参数字典
-    keys : List[str]
-        要注入的键名列表（如 ['random_seed', 'random_state']）
-    seed : int
-        随机种子值
-
-    Returns
-    -------
-    Dict[str, Any]
-        更新后的参数字典（不修改原字典）
-    """
-    updated = dict(params)
-    for key in keys:
-        if key not in updated:
-            updated[key] = seed
-    return updated
-
-
 def get_feature_names(feature_set: str) -> List[str]:
     """
     获取特征集的特征名称列表
@@ -317,8 +346,13 @@ def get_config_dict() -> Dict[str, Any]:
     将 CONFIG 对象转换为字典形式
 
     这是项目统一的配置获取接口，main.py 和 tools/*.py 都应使用此函数
+
+    返回的配置项分为两类：
+    1. 运行时配置：数据路径、CV 参数、输出目录等，可根据需要修改
+    2. 模型默认参数：经过调优的设计值，不建议随意修改（见 model_defaults）
     """
     return {
+        # === 运行时配置（可根据需要修改）===
         'data_path': CONFIG.data.path,
         'data_encoding': CONFIG.data.encoding,
         'feature_sets': CONFIG.data.feature_sets,
@@ -328,12 +362,37 @@ def get_config_dict() -> Dict[str, Any]:
         'n_splits': CONFIG.cv.n_splits,
         'random_seed': CONFIG.cv.random_seed,
         'output_dir': CONFIG.output.output_dir,
+        'test_output_dir': CONFIG.output.test_output_dir,  # 测试模式输出目录
+
+        # === 模型默认参数（经过调优，不建议随意修改）===
+        # 这些参数基于实验验证，修改可能导致性能下降
+        'model_defaults': {
+            'ert': CONFIG.model.ert,           # ExtraTrees: n_estimators=200, max_depth=15
+            'catboost': {                       # CatBoost 配置
+                'iterations': CONFIG.model.catboost.iterations,
+                'depth': CONFIG.model.catboost.depth,
+                'learning_rate': CONFIG.model.catboost.learning_rate,
+                'loss_function': CONFIG.model.catboost.loss_function,
+                'task_type': CONFIG.model.catboost.task_type,
+            },
+            'stacking': CONFIG.model.stacking,  # Stacking: inner_cv=5
+            'rf': CONFIG.model.rf,              # RandomForest: n_estimators=200, max_depth=15
+        },
+
+        # === 数据增强配置（基于 Ágreda-López 2024，不建议随意修改）===
+        'augmentation': {
+            'n_aug': CONFIG.augmentation.n_aug,  # 每样本增强副本数，默认 15
+            'error_model': CONFIG.augmentation.error_model,
+        },
+
+        # === MC 不确定性配置 ===
+        'uncertainty': {
+            'n_mc': CONFIG.uncertainty.n_mc,
+            'percentiles': CONFIG.uncertainty.percentiles,
+        },
     }
 
 
-def get_legacy_config() -> Dict[str, Any]:
-    """向后兼容别名"""
-    return get_config_dict()
 
 
 # ============================================================

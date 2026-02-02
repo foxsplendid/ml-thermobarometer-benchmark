@@ -17,7 +17,7 @@ Chapter 3 Benchmark Protocol - 主入口
 注意：
     - 绘图功能请使用 tools/plot_offline_figures.py
     - 稳定性测试请使用 tools/run_stability.py
-    - MC不确定性测试请使用 tools/run_mc_uncertainty.py
+    - 分析误差传播请使用 tools/run_error_propagation.py
 """
 
 import os
@@ -118,7 +118,6 @@ def get_experiment_configs():
                 corr_module_name=base['corr'],
                 feature_set=fset,
                 run_uncertainty=False,  # 不确定性测试在tools中运行
-                run_random_split=False,  # 随机划分测试在tools中运行
             ))
 
     return final_configs  # 24个实验
@@ -140,7 +139,7 @@ def load_data(config, feature_set='Liquid'):
 
     Returns
     -------
-    X, y_T, y_P, groups
+    X, y_T, y_P
     """
     print(f"加载数据（特征集: {feature_set}）...")
 
@@ -161,7 +160,6 @@ def load_data(config, feature_set='Liquid'):
     X = df[feature_cols].values.astype(np.float64)
     y_T = df[config['target_T']].values.astype(np.float64)
     y_P = df[config['target_P']].values.astype(np.float64)
-    groups = df[config['group_col']].values
 
     # 填充缺失值
     X = np.nan_to_num(X, nan=0.0)
@@ -170,19 +168,18 @@ def load_data(config, feature_set='Liquid'):
     print(f"  数据形状: X={X.shape}")
     print(f"  温度范围: {y_T.min():.0f} - {y_T.max():.0f} ℃")
     print(f"  压力范围: {y_P.min():.2f} - {y_P.max():.2f} kbar")
-    print(f"  分组数量: {len(np.unique(groups))}")
     
-    return X, y_T, y_P, groups
+    return X, y_T, y_P
 
 
 # ============================================================
 # 数据划分
 # ============================================================
 
-def prepare_splits(X, y_T, y_P, groups, config):
+def prepare_splits(X, y_T, y_P, config):
     """准备测试集划分（P-T网格采样）
 
-    注意：不再使用Ref分组约束，优先保证P-T分布平衡
+    注意：使用P-T分层采样，保证测试集的P-T分布平衡
     """
     from src.splitters import compute_pt_edges, assign_pt_bins, select_test_indices
 
@@ -237,9 +234,9 @@ def main():
 
     # 1. 加载数据（使用默认Liquid特征集进行分割）
     # 注意：不同特征集使用相同的P-T分箱和测试集划分
-    X_liquid, y_T, y_P, groups = load_data(CONFIG, feature_set='Liquid')
+    X_liquid, y_T, y_P = load_data(CONFIG, feature_set='Liquid')
 
-    split_data = prepare_splits(X_liquid, y_T, y_P, groups, CONFIG)
+    split_data = prepare_splits(X_liquid, y_T, y_P, CONFIG)
     split_info = split_data['split_info']
     print(f"Test size: {split_info['test_size']}, P-T bins: {split_info['n_pt_bins']}")
 
@@ -247,6 +244,16 @@ def main():
     train_idx = split_data['train_idx']
     test_idx = split_data['test_idx']
     tp_bins_train = split_data['tp_bins_train']
+
+    from src.protocol import _merge_sparse_bins, _get_effective_n_splits
+
+    # 稀疏 bin 容易导致分层 CV 报错，先合并再计算有效折数
+    tp_bins_train_cv = _merge_sparse_bins(tp_bins_train, min_samples_per_bin=CONFIG['n_splits'])
+    n_bins_before = len(np.unique(tp_bins_train))
+    n_bins_after = len(np.unique(tp_bins_train_cv))
+    effective_n_splits = _get_effective_n_splits(tp_bins_train_cv, CONFIG['n_splits'], len(train_idx))
+    if effective_n_splits < CONFIG['n_splits'] or n_bins_after < n_bins_before:
+        print(f"CV 折数: {CONFIG['n_splits']} -> {effective_n_splits}, bins: {n_bins_before} -> {n_bins_after}")
 
     # 2. 获取实验配置
     configs = get_experiment_configs()
@@ -261,7 +268,7 @@ def main():
         print(f"{'='*70}")
 
         # 加载该特征集的数据
-        X, y_T, y_P, groups = load_data(CONFIG, feature_set=feature_set)
+        X, y_T, y_P = load_data(CONFIG, feature_set=feature_set)
 
         # 使用相同的train/test划分
         X_train = X[train_idx]
@@ -270,7 +277,6 @@ def main():
         y_T_test = y_T[test_idx]
         y_P_train = y_P[train_idx]
         y_P_test = y_P[test_idx]
-        groups_train = groups[train_idx]
 
         # 筛选该特征集的实验配置
         feature_configs = [c for c in configs if c.feature_set == feature_set]
@@ -283,15 +289,14 @@ def main():
             X=X_train,
             y_T=y_T_train,
             y_P=y_P_train,
-            groups=groups_train,
             output_dir=CONFIG['output_dir'],
         )
 
         # 运行实验
         summary_df = matrix.run_experiments(
             configs=feature_configs,
-            n_splits=CONFIG['n_splits'],
-            stratify_labels=tp_bins_train,
+            n_splits=effective_n_splits,
+            stratify_labels=tp_bins_train_cv,
             X_test=X_test,
             y_T_test=y_T_test,
             y_P_test=y_P_test,
@@ -310,6 +315,8 @@ def main():
     # 6. 保存配置
     matrix.save_config(configs, extra_info={
         'n_splits': CONFIG['n_splits'],
+        'n_splits_requested': CONFIG['n_splits'],
+        'n_splits_used': effective_n_splits,
         'random_seed': CONFIG['random_seed'],
         'test_split': split_info,
         'feature_sets': list(CONFIG['feature_sets'].keys()),
@@ -337,14 +344,14 @@ def run_quick_test():
     print("快速测试模式（2折，4个实验）")
     print("=" * 70)
 
-    # 修改配置
+    # 修改配置：使用配置中定义的测试输出目录
     test_config = CONFIG.copy()
-    test_config['output_dir'] = os.path.join(PROJECT_ROOT, 'results_test')
+    test_config['output_dir'] = CONFIG['test_output_dir']
 
     # 1. 加载数据（使用Liquid特征集进行分割）
-    X_liquid, y_T, y_P, groups = load_data(test_config, feature_set='Liquid')
+    X_liquid, y_T, y_P = load_data(test_config, feature_set='Liquid')
 
-    split_data = prepare_splits(X_liquid, y_T, y_P, groups, test_config)
+    split_data = prepare_splits(X_liquid, y_T, y_P, test_config)
     split_info = split_data['split_info']
     print(f"Test size: {split_info['test_size']}, P-T bins: {split_info['n_pt_bins']}")
 
@@ -352,6 +359,16 @@ def run_quick_test():
     train_idx = split_data['train_idx']
     test_idx = split_data['test_idx']
     tp_bins_train = split_data['tp_bins_train']
+
+    from src.protocol import _merge_sparse_bins, _get_effective_n_splits
+
+    # 稀疏 bin 容易导致分层 CV 报错，快速测试也需要合并
+    tp_bins_train_cv = _merge_sparse_bins(tp_bins_train, min_samples_per_bin=2)
+    n_bins_before = len(np.unique(tp_bins_train))
+    n_bins_after = len(np.unique(tp_bins_train_cv))
+    effective_n_splits = _get_effective_n_splits(tp_bins_train_cv, 2, len(train_idx))
+    if effective_n_splits < 2 or n_bins_after < n_bins_before:
+        print(f"CV 折数: 2 -> {effective_n_splits}, bins: {n_bins_before} -> {n_bins_after}")
 
     # 2. 获取前2个基础配置（快速测试）
     all_configs = get_experiment_configs()
@@ -368,7 +385,7 @@ def run_quick_test():
         print(f"{'='*70}")
 
         # 加载该特征集的数据
-        X, y_T, y_P, groups = load_data(test_config, feature_set=feature_set)
+        X, y_T, y_P = load_data(test_config, feature_set=feature_set)
 
         # 使用相同的train/test划分
         X_train = X[train_idx]
@@ -377,7 +394,6 @@ def run_quick_test():
         y_T_test = y_T[test_idx]
         y_P_train = y_P[train_idx]
         y_P_test = y_P[test_idx]
-        groups_train = groups[train_idx]
 
         # 筛选该特征集的实验配置
         feature_configs = [c for c in test_configs if c.feature_set == feature_set]
@@ -390,15 +406,14 @@ def run_quick_test():
             X=X_train,
             y_T=y_T_train,
             y_P=y_P_train,
-            groups=groups_train,
             output_dir=test_config['output_dir'],
         )
 
         # 运行实验（2折快速测试）
         summary_df = matrix.run_experiments(
             configs=feature_configs,
-            n_splits=2,  # 快速测试使用2折
-            stratify_labels=tp_bins_train,
+            n_splits=effective_n_splits,  # 快速测试使用2折
+            stratify_labels=tp_bins_train_cv,
             X_test=X_test,
             y_T_test=y_T_test,
             y_P_test=y_P_test,

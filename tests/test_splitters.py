@@ -11,7 +11,6 @@ from src.splitters import (
     compute_pt_edges,
     assign_pt_bins,
     select_test_indices,
-    stratified_subsample_indices,
     PTBins
 )
 
@@ -141,59 +140,3 @@ class TestSelectTestIndices:
         assert not np.array_equal(test_idx1, test_idx2)
 
 
-class TestStratifiedSubsampleIndices:
-    """stratified_subsample_indices 测试"""
-
-    def test_basic_subsample(self, pt_data):
-        """基本子采样"""
-        y_T, y_P = pt_data
-        indices = np.arange(len(y_T))
-        bins = compute_pt_edges(y_T, y_P)
-        strat_labels = assign_pt_bins(y_T, y_P, bins)
-
-        sub_indices = stratified_subsample_indices(
-            indices, strat_labels, fraction=0.5, seed=42
-        )
-
-        assert len(sub_indices) > 0
-        assert len(sub_indices) < len(indices)
-
-    def test_fraction_one_returns_all(self, pt_data):
-        """fraction=1.0 应返回全部"""
-        y_T, y_P = pt_data
-        indices = np.arange(len(y_T))
-        bins = compute_pt_edges(y_T, y_P)
-        strat_labels = assign_pt_bins(y_T, y_P, bins)
-
-        sub_indices = stratified_subsample_indices(
-            indices, strat_labels, fraction=1.0, seed=42
-        )
-
-        assert len(sub_indices) == len(indices)
-
-    def test_invalid_fraction_raises(self, pt_data):
-        """无效 fraction 应抛出异常"""
-        y_T, y_P = pt_data
-        indices = np.arange(len(y_T))
-        bins = compute_pt_edges(y_T, y_P)
-        strat_labels = assign_pt_bins(y_T, y_P, bins)
-
-        with pytest.raises(ValueError):
-            stratified_subsample_indices(indices, strat_labels, fraction=0, seed=42)
-
-        with pytest.raises(ValueError):
-            stratified_subsample_indices(indices, strat_labels, fraction=1.5, seed=42)
-
-    def test_preserves_original_indices(self, pt_data):
-        """返回的是原始索引空间的值"""
-        y_T, y_P = pt_data
-        indices = np.arange(100, 100 + len(y_T))  # 非 0 起始
-        bins = compute_pt_edges(y_T, y_P)
-        strat_labels = assign_pt_bins(y_T, y_P, bins)
-
-        sub_indices = stratified_subsample_indices(
-            indices, strat_labels, fraction=0.5, seed=42
-        )
-
-        # 所有返回值应在原始 indices 中
-        assert np.all(np.isin(sub_indices, indices))
