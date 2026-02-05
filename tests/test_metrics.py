@@ -63,17 +63,17 @@ class TestBasicMetrics:
         r2_val = r2(y_true, y_pred)
         assert 0 <= r2_val <= 1
 
-    def test_bias_positive_means_overestimate(self):
-        """正偏差表示高估"""
-        y_true = np.array([1, 2, 3])
-        y_pred = np.array([2, 3, 4])  # 全部高估 1
+    def test_bias_positive_means_underestimate(self):
+        """正偏差表示低估"""
+        y_true = np.array([2, 3, 4])
+        y_pred = np.array([1, 2, 3])  # 低估 1
 
         assert bias(y_true, y_pred) == 1.0
 
-    def test_bias_negative_means_underestimate(self):
-        """负偏差表示低估"""
-        y_true = np.array([2, 3, 4])
-        y_pred = np.array([1, 2, 3])  # 全部低估 1
+    def test_bias_negative_means_overestimate(self):
+        """负偏差表示高估"""
+        y_true = np.array([1, 2, 3])
+        y_pred = np.array([2, 3, 4])  # 高估 1
 
         assert bias(y_true, y_pred) == -1.0
 

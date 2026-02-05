@@ -15,10 +15,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from .interfaces import DataModule, ModelModule, CorrectionModule, UncertaintyModule, DataModuleState
-from .metrics import summarize_folds
+from .metrics import summarize_folds, compute_all_metrics
 
 # 获取日志器
 logger = logging.getLogger(__name__)
+
+P_SEED_OFFSET = 1000
+
+def _derive_target_seed(base_seed: int, target_name: str) -> int:
+    """为 P 目标增加偏移量，降低温压随机相关性。"""
+    return base_seed + (P_SEED_OFFSET if str(target_name).upper() == "P" else 0)
 
 
 # ============================================================
@@ -201,90 +207,6 @@ class Pipeline:
 # ============================================================
 # 指标计算函数
 # ============================================================
-
-def compute_all_metrics(y_true: np.ndarray,
-                        y_pred: np.ndarray,
-                        y_pred_raw: Optional[np.ndarray] = None,
-                        n_bins: int = 5) -> Dict[str, float]:
-    """
-    计算完整指标集
-    
-    Parameters
-    ----------
-    y_true : np.ndarray
-        真实值
-    y_pred : np.ndarray
-        校正后预测值（或唯一预测值）
-    y_pred_raw : np.ndarray, optional
-        校正前预测值
-    n_bins : int
-        分箱数量（用于端元诊断）
-        
-    Returns
-    -------
-    metrics : dict
-        完整指标字典
-    """
-    from sklearn.metrics import mean_squared_error, mean_absolute_error
-    from scipy.stats import linregress
-    
-    metrics = {}
-    
-    # 基础指标
-    metrics['rmse'] = np.sqrt(mean_squared_error(y_true, y_pred))
-    metrics['mae'] = mean_absolute_error(y_true, y_pred)
-    # MBE: 正值表示预测偏低（y_true > y_pred），负值表示预测偏高（y_true < y_pred）
-    metrics['mbe'] = np.mean(y_true - y_pred)
-
-    # R²
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    metrics['r2'] = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    
-    # 回归诊断（y_pred 预测 y_true）
-    if len(y_pred) > 2 and np.std(y_pred) > 1e-10:
-        reg = linregress(y_pred, y_true)
-        metrics['slope'] = reg.slope
-        metrics['intercept'] = reg.intercept
-    else:
-        metrics['slope'] = np.nan
-        metrics['intercept'] = np.nan
-    
-    # 残差标准差
-    metrics['resid_std'] = np.std(y_true - y_pred)
-    
-    # 校正前指标（如果提供）
-    if y_pred_raw is not None:
-        metrics['rmse_raw'] = np.sqrt(mean_squared_error(y_true, y_pred_raw))
-        metrics['mae_raw'] = mean_absolute_error(y_true, y_pred_raw)
-        # MBE_raw: 与 MBE 方向一致，正值表示预测偏低
-        metrics['mbe_raw'] = np.mean(y_true - y_pred_raw)
-
-        if len(y_pred_raw) > 2 and np.std(y_pred_raw) > 1e-10:
-            reg_raw = linregress(y_pred_raw, y_true)
-            metrics['slope_raw'] = reg_raw.slope
-            metrics['intercept_raw'] = reg_raw.intercept
-    
-    # 分箱误差
-    if n_bins > 0 and len(y_true) >= n_bins:
-        try:
-            percentiles = np.linspace(0, 100, n_bins + 1)
-            bin_edges = np.percentile(y_true, percentiles)
-            
-            for i in range(n_bins):
-                if i == n_bins - 1:
-                    mask = (y_true >= bin_edges[i]) & (y_true <= bin_edges[i + 1])
-                else:
-                    mask = (y_true >= bin_edges[i]) & (y_true < bin_edges[i + 1])
-                
-                if np.sum(mask) >= 3:
-                    metrics[f'mae_bin{i}'] = mean_absolute_error(y_true[mask], y_pred[mask])
-                    # 分箱 MBE: 与整体 MBE 方向一致
-                    metrics[f'mbe_bin{i}'] = np.mean(y_true[mask] - y_pred[mask])
-        except Exception:
-            pass
-    
-    return metrics
 
 
 # 分层 CV 辅助函数
@@ -638,6 +560,14 @@ class ExperimentMatrix:
             print(f"实验: {config.exp_id}")
             print(f"配置: {config.data_module_name} + {config.model_module_name} + {config.corr_module_name}")
             print(f"{'='*60}")
+
+            exp_result = {
+                'exp_id': config.exp_id,
+                'data_module': config.data_module_name,
+                'model_module': config.model_module_name,
+                'corr_module': config.corr_module_name,
+                'feature_set': config.feature_set,
+            }
             
             # 创建 pipeline 工厂
             def make_pipeline_factory(cfg):
@@ -657,7 +587,8 @@ class ExperimentMatrix:
             pipeline_factory = make_pipeline_factory(config)
             
             # 不确定性模块（从 config.uncertainty_params 读取参数）
-            unc_module = None
+            # 从配置中汇总不确定性参数，避免目标间复用同一随机序列
+            unc_params_base = None
             if config.run_uncertainty:
                 unc_params = {}
                 try:
@@ -666,28 +597,26 @@ class ExperimentMatrix:
                         'n_mc': APP_CONFIG.uncertainty.n_mc,
                         'percentiles': APP_CONFIG.uncertainty.percentiles,
                     })
+                    feature_names = APP_CONFIG.data.feature_sets.get(config.feature_set)
+                    if feature_names:
+                        unc_params.setdefault('feature_names', list(feature_names))
                 except Exception:
                     pass
 
                 if config.uncertainty_params:
                     unc_params.update(config.uncertainty_params)
-                unc_params.setdefault('random_seed', random_seed)
-                unc_module = MCUncertaintyEstimator(**unc_params)
-
-            # 运行两个目标（T 和 P）
-            exp_result = {
-                'exp_id': config.exp_id,
-                'feature_set': config.feature_set,
-                'data_module': config.data_module_name,
-                'model_module': config.model_module_name,
-                'corr_module': config.corr_module_name,
-            }
-            
+                unc_params_base = unc_params
             for target_name, y in [('T', self.y_T), ('P', self.y_P)]:
+                target_seed = _derive_target_seed(random_seed, target_name)
+                unc_module = None
+                if config.run_uncertainty and unc_params_base is not None:
+                    unc_params = dict(unc_params_base)
+                    unc_params.setdefault('random_seed', target_seed)
+                    unc_module = MCUncertaintyEstimator(**unc_params)
                 print(f"\n--- 目标: {target_name} ---")
                 
                 # 主协议
-                protocol = StratifiedCVProtocol(n_splits=n_splits, random_seed=random_seed)
+                protocol = StratifiedCVProtocol(n_splits=n_splits, random_seed=target_seed)
                 corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
                 results = protocol.run(
                     self.X, y,
@@ -715,7 +644,7 @@ class ExperimentMatrix:
                 models_dir = os.path.join(self.output_dir, 'models')
                 os.makedirs(models_dir, exist_ok=True)
 
-                full_pipeline = _call_pipeline_factory(pipeline_factory, random_seed)
+                full_pipeline = _call_pipeline_factory(pipeline_factory, target_seed)
                 full_pipeline.fit(self.X, y, stratify_labels=stratify_labels)
                 full_pipeline.set_correction(results['corr_module'], results['corr_model'])
 
@@ -767,7 +696,6 @@ class ExperimentMatrix:
                               X_test: np.ndarray,
                               y_T_test: np.ndarray,
                               y_P_test: np.ndarray,
-                              groups_test: np.ndarray,
                               stratify_labels: Optional[np.ndarray] = None,
                               n_splits: int = 10,
                               test_size: float = 0.3,
@@ -820,6 +748,7 @@ class ExperimentMatrix:
             corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
 
             for target_name, y_full, y_test in [('T', self.y_T, y_T_test), ('P', self.y_P, y_P_test)]:
+                target_seed_base = _derive_target_seed(random_seed, target_name)
                 repeat_metrics = []
                 idx_all = np.arange(len(self.X))
             
@@ -885,7 +814,7 @@ class ExperimentMatrix:
                     subsample_stratify = None
 
                 for i in range(start_repeat, repeat_end + 1):
-                    seed = random_seed + i
+                    seed = target_seed_base + i
 
                     # 使用 stratify 约束子采样，保证训练子集的 P-T 分布与整体一致
                     if subsample_stratify is not None:
@@ -904,14 +833,19 @@ class ExperimentMatrix:
 
                     X_train = self.X[train_idx]
                     y_train = y_full[train_idx]
-                    groups_train = self.groups[train_idx]
                     if stratify_labels is not None:
                         stratify_raw = stratify_labels[train_idx]
+                        n_bins_raw = len(np.unique(stratify_raw))
                         merged_labels = _merge_sparse_bins(stratify_raw, min_samples_per_bin=n_splits)
+                        n_bins_merged = len(np.unique(merged_labels))
+                        bins_merged = int(n_bins_merged < n_bins_raw)
                         stratify_train = merged_labels
                     else:
                         merged_labels = None
                         stratify_train = None
+                        n_bins_raw = 0
+                        n_bins_merged = 0
+                        bins_merged = 0
             
                     effective_n_splits = _get_effective_n_splits(merged_labels, n_splits, len(X_train))
             
@@ -919,7 +853,6 @@ class ExperimentMatrix:
                     cv_results = protocol.run(
                         X_train,
                         y_train,
-                        groups_train,
                         pipeline_factory,
                         uncertainty_module=None,
                         corr_module=corr_module,
@@ -929,7 +862,7 @@ class ExperimentMatrix:
                     corr_model = cv_results["corr_model"]
             
                     pipeline = pipeline_factory(seed)
-                    pipeline.fit(X_train, y_train, groups_train, stratify_labels=stratify_train)
+                    pipeline.fit(X_train, y_train, stratify_labels=stratify_train)
                     pipeline.set_correction(corr_module, corr_model)
             
                     X_test_scaled, _ = pipeline.data_module.transform(X_test, pipeline._state)
@@ -938,6 +871,11 @@ class ExperimentMatrix:
             
                     metrics = compute_all_metrics(y_test, y_pred_corr, y_pred_raw)
                     metrics["repeat_id"] = i
+                    metrics["n_splits_requested"] = n_splits
+                    metrics["n_splits_used"] = effective_n_splits
+                    metrics["n_bins_raw"] = n_bins_raw
+                    metrics["n_bins_merged"] = n_bins_merged
+                    metrics["bins_merged"] = bins_merged
                     repeat_metrics.append(metrics)
             
                     current_idx = i - repeat_start + 1
@@ -1034,6 +972,7 @@ class ExperimentMatrix:
             'experiments': [
                 {
                     'exp_id': c.exp_id,
+                    'feature_set': c.feature_set,
                     'data_module': c.data_module_name,
                     'model_module': c.model_module_name,
                     'corr_module': c.corr_module_name,
@@ -1046,7 +985,6 @@ class ExperimentMatrix:
             'data_shape': {
                 'n_samples': len(self.X),
                 'n_features': self.X.shape[1],
-                'n_groups': len(np.unique(self.groups)),
             },
             'version_info': version_info,
         }

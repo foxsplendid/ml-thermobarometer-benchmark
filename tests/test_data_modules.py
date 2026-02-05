@@ -110,60 +110,50 @@ class TestBalancedDataModule:
 class TestAugmentedDataModule:
     """AugmentedDataModule 测试"""
 
-    def test_augmentation_increases_samples(self, train_val_split):
-        """验证增强后样本数增加"""
+    def test_augmentation_increases_samples(self, sample_data_large):
+        """增强后样本数应增加"""
+        X, y = sample_data_large
         n_aug = 5
         module = AugmentedDataModule(n_aug=n_aug)
-        X2, y2, _, _ = module.fit_transform(
-            train_val_split['X_train'],
-            train_val_split['y_train']
-        )
+        X2, y2, _, _ = module.fit_transform(X, y)
 
-        original_size = len(train_val_split['X_train'])
-        expected_size = original_size * (1 + n_aug)
+        expected_size = len(X) * (1 + n_aug)
         assert len(X2) == expected_size
         assert len(y2) == expected_size
 
-    def test_original_samples_preserved(self, train_val_split):
-        """验证原始样本被保留（在增强数据的前部）"""
+    def test_original_samples_preserved(self, sample_data_large):
+        """原始样本应被保留在前段"""
+        X, y = sample_data_large
         module = AugmentedDataModule(n_aug=3)
-        X2, y2, _, state = module.fit_transform(
-            train_val_split['X_train'],
-            train_val_split['y_train']
-        )
+        X2, y2, _, state = module.fit_transform(X, y)
 
-        original_size = len(train_val_split['X_train'])
-
-        # 前 original_size 个样本是原始数据（标准化后）
-        X_orig_scaled = state.scaler.transform(train_val_split['X_train'])
+        original_size = len(X)
+        X_orig_scaled = state.scaler.transform(X)
         assert np.allclose(X2[:original_size], X_orig_scaled)
+        assert len(y2) == original_size * 4
 
-    def test_transform_no_augmentation(self, train_val_split):
-        """验证 transform 不进行增强"""
+    def test_transform_no_augmentation(self, sample_data_large):
+        """transform 不进行增强"""
+        X, y = sample_data_large
+        X_train, X_val = X[:400], X[400:]
+        y_train = y[:400]
         module = AugmentedDataModule(n_aug=5)
-        _, _, _, state = module.fit_transform(
-            train_val_split['X_train'],
-            train_val_split['y_train']
-        )
+        _, _, _, state = module.fit_transform(X_train, y_train)
 
-        X_val_scaled, _ = module.transform(train_val_split['X_val'], state)
+        X_val_scaled, _ = module.transform(X_val, state)
+        assert X_val_scaled.shape == X_val.shape
 
-        # 验证集大小不变
-        assert X_val_scaled.shape == train_val_split['X_val'].shape
+    def test_feature_name_inference(self, sample_data_large):
+        """feature_names 自动推断"""
+        from config import DataConfig
 
-    def test_epma_perturbation_bounds(self, train_val_split):
-        """验证 EPMA 扰动后值非负"""
-        module = AugmentedDataModule(n_aug=10, clip_min=0.0)
-        X2, _, _, _ = module.fit_transform(
-            train_val_split['X_train'],
-            train_val_split['y_train']
-        )
+        X, y = sample_data_large
+        module = AugmentedDataModule(n_aug=2)
+        _, _, _, state = module.fit_transform(X, y)
 
-        # 所有值应非负（因为 clip_min=0.0）
-        # 注意：标准化后可能为负，这里检查原始空间
-        # 由于增强在原始空间进行后再标准化，此处不直接检查
-        # 改为检查形状正确
-        assert X2.shape[1] == train_val_split['X_train'].shape[1]
+        assert state.feature_names is not None
+        assert len(state.feature_names) == X.shape[1]
+        assert state.feature_names == DataConfig().feature_sets['Liquid']
 
 
 class TestGetDataModule:

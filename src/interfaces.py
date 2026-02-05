@@ -83,8 +83,7 @@ class DataModule(ABC):
         elif n_features == 9:
             from config import DataConfig
             return DataConfig().feature_sets['NoLiquid']
-        else:
-            return [f'feature_{i}' for i in range(n_features)]
+        raise ValueError(f"无法根据特征数推断特征名，n_features={n_features}，必须显式传入 feature_names")
 
     @abstractmethod
     def fit_transform(self, 

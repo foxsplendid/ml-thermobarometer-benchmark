@@ -37,8 +37,8 @@ def mape(y_true: np.ndarray, y_pred: np.ndarray, epsilon: float = 1e-8) -> float
 
 
 def bias(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """计算偏差（预测值 - 真实值的均值）"""
-    return np.mean(y_pred - y_true)
+    """计算偏差（真实值 - 预测值的均值），正值表示模型低估"""
+    return np.mean(y_true - y_pred)
 
 
 def compute_slope_intercept(y_true: np.ndarray, y_pred: np.ndarray) -> tuple:
@@ -137,6 +137,72 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         f'{prefix}bias_mean': bias_stats['bias_mean'],
         f'{prefix}resid_std': bias_stats['resid_std']
     }
+
+
+def compute_all_metrics(y_true: np.ndarray,
+                        y_pred: np.ndarray,
+                        y_pred_raw: Union[np.ndarray, None] = None,
+                        n_bins: int = 5) -> Dict[str, float]:
+    """
+    计算完整指标集（含校正前后对比与分箱误差）。
+    """
+    from scipy.stats import linregress
+
+    metrics: Dict[str, float] = {}
+
+    # 基础指标
+    metrics['rmse'] = np.sqrt(mean_squared_error(y_true, y_pred))
+    metrics['mae'] = mean_absolute_error(y_true, y_pred)
+    # MBE: 正值表示预测偏低（y_true > y_pred），负值表示预测偏高
+    metrics['mbe'] = np.mean(y_true - y_pred)
+
+    # R²
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    metrics['r2'] = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # 回归诊断（y_pred 预测 y_true）
+    if len(y_pred) > 2 and np.std(y_pred) > 1e-10:
+        reg = linregress(y_pred, y_true)
+        metrics['slope'] = reg.slope
+        metrics['intercept'] = reg.intercept
+    else:
+        metrics['slope'] = np.nan
+        metrics['intercept'] = np.nan
+
+    # 残差标准差
+    metrics['resid_std'] = np.std(y_true - y_pred)
+
+    # 校正前指标
+    if y_pred_raw is not None:
+        metrics['rmse_raw'] = np.sqrt(mean_squared_error(y_true, y_pred_raw))
+        metrics['mae_raw'] = mean_absolute_error(y_true, y_pred_raw)
+        metrics['mbe_raw'] = np.mean(y_true - y_pred_raw)
+
+        if len(y_pred_raw) > 2 and np.std(y_pred_raw) > 1e-10:
+            reg_raw = linregress(y_pred_raw, y_true)
+            metrics['slope_raw'] = reg_raw.slope
+            metrics['intercept_raw'] = reg_raw.intercept
+
+    # 分箱误差
+    if n_bins > 0 and len(y_true) >= n_bins:
+        try:
+            percentiles = np.linspace(0, 100, n_bins + 1)
+            bin_edges = np.percentile(y_true, percentiles)
+
+            for i in range(n_bins):
+                if i == n_bins - 1:
+                    mask = (y_true >= bin_edges[i]) & (y_true <= bin_edges[i + 1])
+                else:
+                    mask = (y_true >= bin_edges[i]) & (y_true < bin_edges[i + 1])
+
+                if np.sum(mask) >= 3:
+                    metrics[f'mae_bin{i}'] = mean_absolute_error(y_true[mask], y_pred[mask])
+                    metrics[f'mbe_bin{i}'] = np.mean(y_true[mask] - y_pred[mask])
+        except Exception:
+            pass
+
+    return metrics
 
 
 def compute_metrics_by_target(y_T_true: np.ndarray, y_T_pred: np.ndarray,

@@ -95,7 +95,6 @@ class ExtraTreesModel(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
         """训练 ExtraTrees 模型"""
         from sklearn.ensemble import ExtraTreesRegressor
@@ -193,7 +192,6 @@ class CatBoostModel(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
         """训练 CatBoost 模型"""
         from catboost import CatBoostRegressor, Pool
@@ -251,7 +249,6 @@ class RandomForestModel(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
         """训练 RandomForest 模型"""
         from sklearn.ensemble import RandomForestRegressor
@@ -291,12 +288,13 @@ class StrictOOFStacking(ModelModule):
        - 用 fit() 时训练好的 base models 预测，得到 Z_val
        - 用 meta-learner 预测最终结果
     
-    基模型组合：ERT + CatBoost + RF
+    基模型组合：ERT + CatBoost + RF（参数通过 base_model_params 传入）
     元模型：Ridge（或 RidgeCV）
     """
     
     def __init__(self,
                  base_models: Optional[List[ModelModule]] = None,
+                 base_model_params: Optional[Dict[str, Dict[str, Any]]] = None,
                  meta_model: Optional[ModelModule] = None,
                  inner_cv: int = 5,
                  use_meta_scaler: bool = True,
@@ -305,7 +303,10 @@ class StrictOOFStacking(ModelModule):
         Parameters
         ----------
         base_models : List[ModelModule], optional
-            基模型列表，默认为 [ERT, CatBoost, RF]
+            基模型列表（直接传入优先）
+        base_model_params : Dict[str, Dict[str, Any]], optional
+            基模型参数配置，格式：{'ert': {...}, 'catboost': {...}, 'rf': {...}}
+            当 base_models 为 None 时使用此参数创建基模型
         meta_model : ModelModule, optional
             元模型，默认为 RidgeModel
         inner_cv : int
@@ -317,16 +318,21 @@ class StrictOOFStacking(ModelModule):
         self.use_meta_scaler = use_meta_scaler
         self.random_seed = random_seed
         
-        # 默认基模型：ERT + CatBoost + RF
-        # 注意：基模型参数与单模型实验保持一致，确保公平对比
-        if base_models is None:
+        # 基模型：优先使用直接传入的 base_models
+        if base_models is not None:
+            self.base_models = base_models
+        elif base_model_params is not None:
+            # 使用配置参数创建基模型
+            ert_params = base_model_params.get('ert', {})
+            catboost_params = base_model_params.get('catboost', {})
+            rf_params = base_model_params.get('rf', {})
             self.base_models = [
-                ExtraTreesModel(n_estimators=200, max_depth=15, random_seed=random_seed),
-                CatBoostModel(iterations=1000, depth=6, random_seed=random_seed),
-                RandomForestModel(n_estimators=200, max_depth=15, random_seed=random_seed),
+                ExtraTreesModel(random_seed=random_seed, **ert_params),
+                CatBoostModel(random_seed=random_seed, **catboost_params),
+                RandomForestModel(random_seed=random_seed, **rf_params),
             ]
         else:
-            self.base_models = base_models
+            raise ValueError("必须提供 base_models 或 base_model_params 之一")
         
         # 默认元模型：Ridge
         if meta_model is None:
@@ -345,7 +351,6 @@ class StrictOOFStacking(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         训练 Stacking 模型
@@ -365,7 +370,6 @@ class StrictOOFStacking(ModelModule):
         n_base = len(self.base_models)
         
         # 1. 使用 inner KFold 生成 OOF 元特征（严格 OOF！）
-        # 注意：不再使用GroupKFold，仅使用StratifiedKFold进行P-T分层
         if stratify_labels is not None:
             splitter = StratifiedKFold(
                 n_splits=self.inner_cv,
@@ -446,7 +450,6 @@ class StrictOOFStacking(ModelModule):
                             model: Dict[str, Any],
                             X_train: np.ndarray,
                             y_train: np.ndarray,
-                            groups: Optional[np.ndarray] = None,
                             sample_weights: Optional[np.ndarray] = None,
                             stratify_labels: Optional[np.ndarray] = None
                             ) -> np.ndarray:
@@ -541,7 +544,6 @@ class RidgeModel(ModelModule):
             X_train: np.ndarray, 
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
-            groups: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
         """训练 Ridge 模型"""
         from sklearn.linear_model import Ridge
@@ -596,6 +598,29 @@ def get_model_module(name: str, **kwargs) -> ModelModule:
     name_lower = name.lower().strip()
     if name_lower not in modules:
         raise ValueError(f"未知模型模块: {name}，支持 {list(set(modules.values()))}")
-    
+
+    if name_lower == 'stacking':
+        # 与 config.py 对齐：未显式传参时自动加载默认基模型与堆叠参数
+        if 'base_models' not in kwargs and 'base_model_params' not in kwargs:
+            from config import get_config_dict
+            base_config = get_config_dict()
+            model_defaults = base_config.get('model_defaults', {})
+
+            base_model_params = {
+                'ert': dict(model_defaults.get('ert', {})),
+                'catboost': dict(model_defaults.get('catboost', {})),
+                'rf': dict(model_defaults.get('rf', {})),
+            }
+            for key, override in model_defaults.get('stacking_base_defaults', {}).items():
+                if key in base_model_params and isinstance(override, dict):
+                    base_model_params[key].update(override)
+
+            kwargs['base_model_params'] = base_model_params
+
+            stacking_params = model_defaults.get('stacking', {})
+            kwargs.setdefault('inner_cv', stacking_params.get('inner_cv', 5))
+            kwargs.setdefault('use_meta_scaler', stacking_params.get('use_meta_scaler', True))
+            kwargs.setdefault('random_seed', base_config.get('random_seed', 42))
+
     return modules[name_lower](**kwargs)
 

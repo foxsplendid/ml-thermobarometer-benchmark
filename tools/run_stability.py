@@ -55,9 +55,11 @@ Notes:
 """
 import argparse
 import glob
+import logging
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Dict, Optional
 
 import numpy as np
@@ -72,9 +74,52 @@ from config import get_config_dict
 from main import load_data, prepare_splits
 from src.metrics import summarize_folds
 from src.protocol import ExperimentConfig, ExperimentMatrix
+from src.logger import setup_logging, get_logger
 
 # 从集中配置获取
 BASE_CONFIG = get_config_dict()
+logger = logging.getLogger(__name__)
+
+
+def _build_model_params(base_config: dict, model_module: str, random_seed: int) -> dict:
+    model_defaults = base_config["model_defaults"]
+    name = model_module.lower()
+
+    if name in {"ert", "extratrees"}:
+        params = dict(model_defaults["ert"])
+    elif name in {"rf", "randomforest"}:
+        params = dict(model_defaults["rf"])
+    elif name in {"catboost", "cb"}:
+        params = dict(model_defaults["catboost"])
+    elif name == "stacking":
+        stacking_params = dict(model_defaults.get("stacking", {}))
+        base_params = {
+            "ert": dict(model_defaults["ert"]),
+            "catboost": dict(model_defaults["catboost"]),
+            "rf": dict(model_defaults["rf"]),
+        }
+        for key, override in model_defaults.get("stacking_base_defaults", {}).items():
+            if key in base_params and isinstance(override, dict):
+                base_params[key].update(override)
+        params = {"base_model_params": base_params}
+        if stacking_params:
+            params.update({
+                "inner_cv": stacking_params.get("inner_cv"),
+                "use_meta_scaler": stacking_params.get("use_meta_scaler"),
+            })
+    else:
+        params = {}
+
+    params["random_seed"] = random_seed
+    return params
+
+
+def _build_data_params(base_config: dict, data_module: str, feature_set: str, random_seed: int) -> dict:
+    params = {"random_seed": random_seed}
+    if data_module.lower() == "augmented":
+        params["feature_names"] = base_config["feature_sets"][feature_set]
+        params["n_aug"] = base_config["augmentation"]["n_aug"]
+    return params
 
 
 def _build_config(
@@ -87,8 +132,8 @@ def _build_config(
 ) -> ExperimentConfig:
     """构建实验配置"""
     # 统一使用 random_seed（模型内部自行转换为 sklearn 的 random_state）
-    model_params = {"random_seed": random_seed}
-    data_params = {"random_seed": random_seed}
+    model_params = _build_model_params(BASE_CONFIG, model_module, random_seed)
+    data_params = _build_data_params(BASE_CONFIG, data_module, feature_set, random_seed)
 
     return ExperimentConfig(
         exp_id=exp_id,
@@ -350,4 +395,17 @@ Examples:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    def _init_logging():
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_filename = f"stability_{timestamp}_{os.getpid()}.log"
+        setup_logging(log_filename=log_filename)
+        global logger
+        logger = get_logger(__name__)
+
+    _init_logging()
+    try:
+        exit_code = main()
+    except Exception:
+        logger.exception("稳定性测试运行异常")
+        raise
+    sys.exit(exit_code)

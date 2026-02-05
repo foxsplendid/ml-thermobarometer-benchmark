@@ -23,6 +23,8 @@ Chapter 3 Benchmark Protocol - 主入口
 import os
 import sys
 import warnings
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 
@@ -41,6 +43,7 @@ if PROJECT_ROOT not in sys.path:
 # 配置（从 config.py 集中管理）
 # ============================================================
 from config import get_config_dict
+from src.logger import setup_logging, get_logger
 
 CONFIG = get_config_dict()
 
@@ -104,6 +107,24 @@ def get_experiment_configs():
         {'data': 'augmented', 'model': 'stacking', 'corr': 'segmented'},
     ]
 
+    # 从配置中获取模型参数
+    ert_params = CONFIG['model_defaults']['ert']
+    catboost_params = CONFIG['model_defaults']['catboost']
+    rf_params = CONFIG['model_defaults']['rf']
+    stacking_params = CONFIG['model_defaults'].get('stacking', {})
+    stacking_base_params = {
+        'ert': dict(ert_params),
+        'catboost': dict(catboost_params),
+        'rf': dict(rf_params),
+    }
+    stacking_base_overrides = CONFIG['model_defaults'].get('stacking_base_defaults', {})
+    for name, params in stacking_base_overrides.items():
+        if name in stacking_base_params and isinstance(params, dict):
+            stacking_base_params[name].update(params)
+
+    # 增强配置
+    aug_params = CONFIG['augmentation']
+
     # 为每个配置生成NoLiquid和Liquid两个版本
     final_configs = []
     for idx, base in enumerate(base_configs, start=1):
@@ -111,12 +132,32 @@ def get_experiment_configs():
             suffix = 'noliq' if fset == 'NoLiquid' else 'liq'
             exp_id = f"E{idx:02d}_{base['model']}_{base['data']}_{base['corr']}_{suffix}"
 
+            # 模型参数：根据模型类型传递对应配置
+            model_params = {}
+            if base['model'] == 'ert':
+                model_params.update(ert_params)
+            elif base['model'] == 'catboost':
+                model_params.update(catboost_params)
+            elif base['model'] == 'stacking':
+                model_params['base_model_params'] = stacking_base_params
+                if stacking_params:
+                    model_params['inner_cv'] = stacking_params.get('inner_cv')
+                    model_params['use_meta_scaler'] = stacking_params.get('use_meta_scaler')
+
+            # 数据模块参数
+            data_params = {}
+            if base['data'] == 'augmented':
+                data_params['feature_names'] = CONFIG['feature_sets'][fset]
+                data_params['n_aug'] = aug_params['n_aug']
+
             final_configs.append(ExperimentConfig(
                 exp_id=exp_id,
                 data_module_name=base['data'],
                 model_module_name=base['model'],
                 corr_module_name=base['corr'],
                 feature_set=fset,
+                data_params=data_params,
+                model_params=model_params,
                 run_uncertainty=False,  # 不确定性测试在tools中运行
             ))
 
@@ -245,16 +286,6 @@ def main():
     test_idx = split_data['test_idx']
     tp_bins_train = split_data['tp_bins_train']
 
-    from src.protocol import _merge_sparse_bins, _get_effective_n_splits
-
-    # 稀疏 bin 容易导致分层 CV 报错，先合并再计算有效折数
-    tp_bins_train_cv = _merge_sparse_bins(tp_bins_train, min_samples_per_bin=CONFIG['n_splits'])
-    n_bins_before = len(np.unique(tp_bins_train))
-    n_bins_after = len(np.unique(tp_bins_train_cv))
-    effective_n_splits = _get_effective_n_splits(tp_bins_train_cv, CONFIG['n_splits'], len(train_idx))
-    if effective_n_splits < CONFIG['n_splits'] or n_bins_after < n_bins_before:
-        print(f"CV 折数: {CONFIG['n_splits']} -> {effective_n_splits}, bins: {n_bins_before} -> {n_bins_after}")
-
     # 2. 获取实验配置
     configs = get_experiment_configs()
     print(f"\n实验数量: {len(configs)} (12个基础配置 × 2种特征集)")
@@ -292,11 +323,11 @@ def main():
             output_dir=CONFIG['output_dir'],
         )
 
-        # 运行实验
+        # 运行实验（直接使用原始 P-T bins，不做稀疏合并）
         summary_df = matrix.run_experiments(
             configs=feature_configs,
-            n_splits=effective_n_splits,
-            stratify_labels=tp_bins_train_cv,
+            n_splits=CONFIG['n_splits'],
+            stratify_labels=tp_bins_train,
             X_test=X_test,
             y_T_test=y_T_test,
             y_P_test=y_P_test,
@@ -315,8 +346,6 @@ def main():
     # 6. 保存配置
     matrix.save_config(configs, extra_info={
         'n_splits': CONFIG['n_splits'],
-        'n_splits_requested': CONFIG['n_splits'],
-        'n_splits_used': effective_n_splits,
         'random_seed': CONFIG['random_seed'],
         'test_split': split_info,
         'feature_sets': list(CONFIG['feature_sets'].keys()),
@@ -360,16 +389,6 @@ def run_quick_test():
     test_idx = split_data['test_idx']
     tp_bins_train = split_data['tp_bins_train']
 
-    from src.protocol import _merge_sparse_bins, _get_effective_n_splits
-
-    # 稀疏 bin 容易导致分层 CV 报错，快速测试也需要合并
-    tp_bins_train_cv = _merge_sparse_bins(tp_bins_train, min_samples_per_bin=2)
-    n_bins_before = len(np.unique(tp_bins_train))
-    n_bins_after = len(np.unique(tp_bins_train_cv))
-    effective_n_splits = _get_effective_n_splits(tp_bins_train_cv, 2, len(train_idx))
-    if effective_n_splits < 2 or n_bins_after < n_bins_before:
-        print(f"CV 折数: 2 -> {effective_n_splits}, bins: {n_bins_before} -> {n_bins_after}")
-
     # 2. 获取前2个基础配置（快速测试）
     all_configs = get_experiment_configs()
     # 筛选前2个基础配置的所有特征集版本（共4个实验）
@@ -409,11 +428,11 @@ def run_quick_test():
             output_dir=test_config['output_dir'],
         )
 
-        # 运行实验（2折快速测试）
+        # 运行实验（2折快速测试，直接使用原始 P-T bins）
         summary_df = matrix.run_experiments(
             configs=feature_configs,
-            n_splits=effective_n_splits,  # 快速测试使用2折
-            stratify_labels=tp_bins_train_cv,
+            n_splits=2,
+            stratify_labels=tp_bins_train,
             X_test=X_test,
             y_T_test=y_T_test,
             y_P_test=y_P_test,
@@ -445,14 +464,26 @@ def run_quick_test():
 # 入口
 # ============================================================
 
+def _init_logging():
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_filename = f"main_{timestamp}_{os.getpid()}.log"
+    setup_logging(log_filename=log_filename)
+    return get_logger(__name__)
+
+
 if __name__ == '__main__':
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Chapter 3 Benchmark Protocol')
-    parser.add_argument('--test', action='store_true', help='运行快速测试')
-    args = parser.parse_args()
-    
-    if args.test:
-        run_quick_test()
-    else:
-        main()
+
+    logger = _init_logging()
+    try:
+        parser = argparse.ArgumentParser(description='Chapter 3 Benchmark Protocol')
+        parser.add_argument('--test', action='store_true', help='运行快速测试')
+        args = parser.parse_args()
+
+        if args.test:
+            run_quick_test()
+        else:
+            main()
+    except Exception:
+        logger.exception("主入口运行异常")
+        raise

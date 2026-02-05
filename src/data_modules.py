@@ -6,7 +6,7 @@ M1 数据模块 - RawDataModule, BalancedDataModule, AugmentedDataModule
 """
 
 import numpy as np
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from sklearn.preprocessing import StandardScaler, KBinsDiscretizer
 
 from .interfaces import DataModule, DataModuleState
@@ -19,8 +19,16 @@ from .interfaces import DataModule, DataModuleState
 class RawDataModule(DataModule):
     """原始数据模块 - 仅标准化，作为基线"""
 
-    def __init__(self, random_seed: int = 42):
+    def __init__(self, random_seed: int = 42, feature_names: Optional[List[str]] = None):
+        """Parameters
+        ----------
+        random_seed : int
+            随机种子（保留用于接口一致性）
+        feature_names : List[str], optional
+            特征列名列表（用于 MC 不确定性模块）
+        """
         self.random_seed = random_seed
+        self.feature_names = feature_names
     
     def fit_transform(self, 
                       X_train: np.ndarray, 
@@ -37,7 +45,8 @@ class RawDataModule(DataModule):
         # 保存状态
         state = DataModuleState(
             scaler=scaler,
-            feature_std=np.std(X_train, axis=0)  # 原始空间标准差（用于MC）
+            feature_std=np.std(X_train, axis=0),  # 原始空间标准差（用于MC）
+            feature_names=self.feature_names
         )
         
         return X_scaled, y_train.copy(), sample_weights, state
@@ -71,7 +80,8 @@ class BalancedDataModule(DataModule):
     def __init__(self, 
                  n_bins: int = 10, 
                  strategy: str = 'quantile',
-                 random_seed: int = 42):
+                 random_seed: int = 42,
+                 feature_names: Optional[List[str]] = None):
         """
         Parameters
         ----------
@@ -79,47 +89,51 @@ class BalancedDataModule(DataModule):
             分箱数量
         strategy : str
             分箱策略: 'quantile'（等频）| 'uniform'（等宽）| 'kmeans'
+        random_seed : int
+            随机种子（用于 kmeans 策略）
+        feature_names : List[str], optional
+            特征列名列表（用于 MC 不确定性模块）
         """
         self.n_bins = n_bins
         self.strategy = strategy
         self.random_seed = random_seed
+        self.feature_names = feature_names
     
     def fit_transform(self, 
                       X_train: np.ndarray, 
                       y_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
-        """标准化并计算样本权重"""
-        # 1. 标准化
+        """标准化训练数据并按目标分箱计算样本权重。"""
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_train)
         
-        # 2. 分箱
+        # 1. 按目标分箱，估计各箱样本数量
         kbd = KBinsDiscretizer(
             n_bins=self.n_bins, 
             encode='ordinal', 
             strategy=self.strategy,
-            subsample=None  # 使用全部数据
+            subsample=None,  # 禁用子采样，保证分箱稳定
+            random_state=self.random_seed if self.strategy == 'kmeans' else None
         )
         bins = kbd.fit_transform(y_train.reshape(-1, 1)).flatten().astype(int)
         
-        # 3. 计算逆频率权重
+        # 2. 反频率加权，避免高频区主导
         bin_counts = np.bincount(bins, minlength=self.n_bins)
-        # 避免除零（对于空箱）
         bin_weights = 1.0 / (bin_counts + 1e-8)
-        # 归一化：使权重总和 = 样本数
         raw_weights = bin_weights[bins]
         sample_weights = raw_weights / raw_weights.sum() * len(y_train)
         
-        # 4. 保存状态
+        # 3. 保存状态
         state = DataModuleState(
             scaler=scaler,
             bin_edges=kbd.bin_edges_,
             feature_std=np.std(X_train, axis=0),
+            feature_names=self.feature_names,
             extra={'kbd': kbd, 'bin_counts': bin_counts}
         )
         
         return X_scaled, y_train.copy(), sample_weights, state
-    
+
     def transform(self, 
                   X_val: np.ndarray, 
                   state: DataModuleState
@@ -139,8 +153,9 @@ class AugmentedDataModule(DataModule):
 
     策略：
     1. 为每个样本生成 n_aug 个扰动副本
-    2. EPMA 相对误差模型：>1 wt% 使用 3% 误差，≤1 wt% 使用 8% 误差
-    3. 扰动样本与原样本使用相同目标值
+    2. EPMA 误差模型：按氧化物列名映射相对误差（主量 3%，低含量 8%）
+    3. 不做负值裁剪，保留完整正态分布
+    4. 与 M4 不确定性模块 / perturbation.py 使用相同的误差模型
 
     注意：
     - 增强仅在训练折内进行，验证折不增强
@@ -151,111 +166,74 @@ class AugmentedDataModule(DataModule):
     def __init__(
                  self, 
                  n_aug: int = 15,
-                 noise_level: float = 0.02,
-                 random_seed: int = 42,
-                 error_model: str = 'epma',
-                 rel_err_high: float = 0.03,
-                 rel_err_low: float = 0.08,
-                 error_threshold: float = 1.0,
-                 clip_min: Optional[float] = 0.0):
+                 feature_names: Optional[List[str]] = None,
+                 random_seed: int = 42):
         """
         Parameters
         ----------
         n_aug : int
             每个原始样本生成的增强副本数
-        noise_level : float
-            高斯噪声水平（error_model != "epma" 时使用）
-        error_model : str
-            "epma" 使用 EPMA 相对误差模型，否则使用高斯噪声
-        rel_err_high : float
-            高含量（> error_threshold）的相对误差
-        rel_err_low : float
-            低含量（≤ error_threshold）的相对误差
-        error_threshold : float
-            高/低含量切换阈值（单位：wt%）
-        clip_min : float or None
-            扰动后最小值裁剪，None 表示不裁剪
+        feature_names : List[str], optional
+            特征列名列表；若为 None，将按特征数自动推断（9/18），否则抛出异常
+        random_seed : int
+            基础随机种子
         """
         self.n_aug = n_aug
-        self.noise_level = noise_level
+        self.feature_names = feature_names
         self.random_seed = random_seed
-        self.error_model = error_model.lower().strip() if isinstance(error_model, str) else "epma"
-        self.rel_err_high = rel_err_high
-        self.rel_err_low = rel_err_low
-        self.error_threshold = error_threshold
-        self.clip_min = clip_min
         self._fit_count = 0  # 调用计数器，用于派生不同的随机种子
-
-    def _epma_perturb(self, X_raw: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
-        rel_err = np.where(
-            np.abs(X_raw) > self.error_threshold,
-            self.rel_err_high,
-            self.rel_err_low
-        )
-        scale = rel_err * np.abs(X_raw)
-        noise = rng.normal(0.0, scale, size=X_raw.shape)
-        X_augmented = X_raw + noise
-        if self.clip_min is not None:
-            X_augmented = np.maximum(X_augmented, self.clip_min)
-        return X_augmented
-
-    def _gaussian_perturb(self, X_raw: np.ndarray, feature_std: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
-        noise = rng.normal(0.0, self.noise_level, X_raw.shape) * feature_std
-        X_augmented = X_raw + noise
-        if self.clip_min is not None:
-            X_augmented = np.maximum(X_augmented, self.clip_min)
-        return X_augmented
 
     def fit_transform(
                       self, 
                       X_train: np.ndarray, 
                       y_train: np.ndarray
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
-        """标准化并生成增强样本"""
-        # 使用调用计数器派生种子，确保每次调用使用不同的随机状态
+        """标准化训练数据并执行 EPMA 扰动增强。"""
+        from .perturbation import get_rel_err_vector, epma_perturb
+
+        # 为每次 fit_transform 派生不同随机种子，避免增强样本重复
         effective_seed = self.random_seed + self._fit_count
         self._fit_count += 1
         rng = np.random.RandomState(effective_seed)
 
-        # 1. 计算特征标准差（高斯模式备用）
+        # 1. 统计原始特征标准差（用于 MC）
         feature_std = np.std(X_train, axis=0)
 
-        # 2. 在原始数据上拟合标准化器
+        # 2. 解析/校验特征名，保证误差模型精确匹配
+        if self.feature_names is None:
+            self.feature_names = self._infer_feature_names(X_train.shape[1])
+        if len(self.feature_names) != X_train.shape[1]:
+            raise ValueError("feature_names 长度必须与 X_train 的特征维度一致")
+        rel_err_vec = get_rel_err_vector(self.feature_names, strict=True)
+
+        # 3. 拟合 scaler（仅在训练折）
         scaler = StandardScaler()
         scaler.fit(X_train)
 
-        # 3. 生成增强样本
+        # 4. 执行扰动增强，与 perturbation.py 误差模型保持一致
         X_list = [X_train]
         y_list = [y_train]
 
         for _ in range(self.n_aug):
-            if self.error_model == "epma":
-                X_augmented = self._epma_perturb(X_train, rng)
-            else:
-                X_augmented = self._gaussian_perturb(X_train, feature_std, rng)
+            X_augmented = epma_perturb(X_train, rel_err_vec, rng)
             X_list.append(X_augmented)
             y_list.append(y_train)
 
-        # 4. 合并并标准化
+        # 5. 拼接并标准化
         X_all = np.vstack(X_list)
         y_all = np.concatenate(y_list)
         X_scaled = scaler.transform(X_all)
 
-        # 5. 样本权重（均匀）
+        # 6. 权重保持一致
         sample_weights = np.ones(len(y_all), dtype=np.float64)
 
-        # 6. 保存状态
+        # 7. 保存状态
         state = DataModuleState(
             scaler=scaler,
             feature_std=feature_std,
+            feature_names=self.feature_names,
             extra={
                 'n_aug': self.n_aug,
-                'noise_level': self.noise_level,
-                'error_model': self.error_model,
-                'rel_err_high': self.rel_err_high,
-                'rel_err_low': self.rel_err_low,
-                'error_threshold': self.error_threshold,
-                'clip_min': self.clip_min,
                 'original_size': len(y_train)
             }
         )

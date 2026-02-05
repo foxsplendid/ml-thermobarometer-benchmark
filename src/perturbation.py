@@ -38,25 +38,25 @@ DEFAULT_OXIDE_REL_ERR = {
     'K2O.liq': 0.08,    # 低含量
 }
 
-DEFAULT_REL_ERR = 0.03  # 未知列名时的默认值
-
-
 def get_rel_err_vector(
     feature_names: List[str],
     oxide_rel_err: Optional[dict] = None,
-    default_rel_err: float = DEFAULT_REL_ERR
+    default_rel_err: Optional[float] = None,
+    strict: bool = True,
 ) -> np.ndarray:
     """
-    根据特征列名列表获取对应的相对误差向量
+    根据特征名生成相对误差向量。
 
     Parameters
     ----------
     feature_names : List[str]
-        特征列名列表，顺序需与 X 的列顺序一致
+        特征列名列表（与 X 的列顺序一致）
     oxide_rel_err : dict, optional
-        自定义的氧化物-相对误差映射表，默认使用 DEFAULT_OXIDE_REL_ERR
-    default_rel_err : float
-        未知列名时的默认相对误差
+        列名到相对误差的映射，默认使用 DEFAULT_OXIDE_REL_ERR
+    default_rel_err : float, optional
+        显式指定未知列名的兜底值（仅 strict=False 时生效）
+    strict : bool
+        是否严格校验列名；True 时发现未知列名直接报错
 
     Returns
     -------
@@ -71,6 +71,10 @@ def get_rel_err_vector(
     """
     if oxide_rel_err is None:
         oxide_rel_err = DEFAULT_OXIDE_REL_ERR
+
+    missing = [name for name in feature_names if name not in oxide_rel_err]
+    if missing and (strict or default_rel_err is None):
+        raise ValueError(f"未找到以下特征的 EPMA 误差映射: {missing}")
 
     return np.array([
         oxide_rel_err.get(name, default_rel_err)

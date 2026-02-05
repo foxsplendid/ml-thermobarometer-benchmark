@@ -23,6 +23,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from logging.handlers import RotatingFileHandler
 
 
 # ============================================================
@@ -92,6 +93,8 @@ class ColorFormatter(logging.Formatter):
 # 全局日志目录
 _LOG_DIR: Optional[Path] = None
 _INITIALIZED: bool = False
+_DEFAULT_MAX_BYTES = 10 * 1024 * 1024
+_DEFAULT_BACKUP_COUNT = 5
 
 
 def setup_logging(
@@ -99,6 +102,9 @@ def setup_logging(
     console_level: int = logging.INFO,
     file_level: int = logging.DEBUG,
     log_filename: Optional[str] = None,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+    backup_count: int = _DEFAULT_BACKUP_COUNT,
+    force: bool = False,
 ) -> None:
     """
     初始化日志系统
@@ -113,10 +119,16 @@ def setup_logging(
         文件日志级别，默认 DEBUG
     log_filename : str, optional
         日志文件名，默认按时间生成
+    max_bytes : int
+        单个日志文件最大大小（字节），超出后滚动
+    backup_count : int
+        日志滚动保留份数
+    force : bool
+        是否强制重新初始化日志器
     """
     global _LOG_DIR, _INITIALIZED
 
-    if _INITIALIZED:
+    if _INITIALIZED and not force:
         return
 
     # 确定日志目录
@@ -150,8 +162,13 @@ def setup_logging(
     console_handler.setFormatter(ColorFormatter(CONSOLE_FORMAT, CONSOLE_DATE_FORMAT))
     root_logger.addHandler(console_handler)
 
-    # 文件处理器
-    file_handler = logging.FileHandler(log_path, encoding='utf-8')
+    # 文件处理器（滚动日志，避免单文件过大）
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding='utf-8'
+    )
     file_handler.setLevel(file_level)
     file_handler.setFormatter(logging.Formatter(FILE_FORMAT, FILE_DATE_FORMAT))
     root_logger.addHandler(file_handler)

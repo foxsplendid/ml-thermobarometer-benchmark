@@ -5,10 +5,9 @@
 项目唯一配置来源，所有模块通过此处获取配置：
     from config import CONFIG, PROJECT_ROOT, get_config_dict, get_version_info
 
-支持：
+说明：
 1. 默认配置（代码内定义）
-2. YAML 文件覆盖（config.yaml，可选）
-3. 版本信息收集（用于结果追溯）
+2. 版本信息收集（用于结果追溯）
 """
 
 import sys
@@ -18,7 +17,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent.absolute()
@@ -35,7 +33,6 @@ class DataConfig:
     encoding: str = 'latin-1'
     target_T: str = 'T'
     target_P: str = 'P'
-    group_col: str = 'Ref'
 
     # 特征集定义
     feature_sets: Dict[str, List[str]] = field(default_factory=lambda: {
@@ -104,6 +101,7 @@ class ModelDefaults:
         'n_estimators': 200,      # 树的数量，增加可提高稳定性但增加训练时间
         'max_depth': 15,          # 最大深度，过深易过拟合
         'min_samples_split': 5,   # 最小分裂样本数
+        'n_jobs': 4,
     })
 
     # CatBoost 参数（强单模型，Boosting 方法）
@@ -131,7 +129,6 @@ class ModelDefaults:
 class AugmentationConfig:
     """数据增强配置（EPMA误差模型）"""
     n_aug: int = 15              # 每个原始样本生成的增强副本数
-    error_model: str = 'epma'    # 误差模型类型
     # 注：具体误差参数由 src/perturbation.py 管理
 
 
@@ -160,79 +157,20 @@ class Config:
 
 def load_config(config_path: Optional[str] = None) -> Config:
     """
-    加载配置，支持 YAML 文件覆盖
+    加载配置（仅使用代码内默认配置）。
 
     Parameters
     ----------
     config_path : str, optional
-        YAML 配置文件路径，None 则使用默认配置
+        兼容保留，当前不会读取外部文件。
 
     Returns
     -------
     Config
         配置实例
     """
-    config = Config()
-
-    # 尝试加载 YAML 覆盖
-    if config_path is None:
-        config_path = PROJECT_ROOT / 'config.yaml'
-
-    if Path(config_path).exists():
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                yaml_config = yaml.safe_load(f)
-
-            if yaml_config:
-                # 覆盖数据配置
-                if 'data' in yaml_config:
-                    for k, v in yaml_config['data'].items():
-                        if hasattr(config.data, k):
-                            setattr(config.data, k, v)
-
-                # 覆盖 CV 配置
-                if 'cv' in yaml_config:
-                    for k, v in yaml_config['cv'].items():
-                        if hasattr(config.cv, k):
-                            setattr(config.cv, k, v)
-
-                # 覆盖输出配置
-                if 'output' in yaml_config:
-                    for k, v in yaml_config['output'].items():
-                        if hasattr(config.output, k):
-                            setattr(config.output, k, v)
-
-                # 覆盖模型配置
-                if 'model' in yaml_config:
-                    model_cfg = yaml_config['model']
-                    if 'ert' in model_cfg and isinstance(model_cfg['ert'], dict):
-                        config.model.ert.update(model_cfg['ert'])
-                    if 'rf' in model_cfg and isinstance(model_cfg['rf'], dict):
-                        config.model.rf.update(model_cfg['rf'])
-                    if 'stacking' in model_cfg and isinstance(model_cfg['stacking'], dict):
-                        config.model.stacking.update(model_cfg['stacking'])
-                    if 'stacking_base_defaults' in model_cfg and isinstance(model_cfg['stacking_base_defaults'], dict):
-                        config.model.stacking_base_defaults = model_cfg['stacking_base_defaults']
-                    if 'catboost' in model_cfg and isinstance(model_cfg['catboost'], dict):
-                        for k, v in model_cfg['catboost'].items():
-                            if hasattr(config.model.catboost, k):
-                                setattr(config.model.catboost, k, v)
-
-                # 覆盖增强配置
-                if 'augmentation' in yaml_config:
-                    for k, v in yaml_config['augmentation'].items():
-                        if hasattr(config.augmentation, k):
-                            setattr(config.augmentation, k, v)
-
-                # 覆盖不确定性配置
-                if 'uncertainty' in yaml_config:
-                    for k, v in yaml_config['uncertainty'].items():
-                        if hasattr(config.uncertainty, k):
-                            setattr(config.uncertainty, k, v)
-        except Exception as e:
-            print(f"警告: 加载配置文件失败 ({e})，使用默认配置")
-
-    return config
+    _ = config_path
+    return Config()
 
 
 def get_version_info() -> Dict[str, Any]:
@@ -358,7 +296,6 @@ def get_config_dict() -> Dict[str, Any]:
         'feature_sets': CONFIG.data.feature_sets,
         'target_T': CONFIG.data.target_T,
         'target_P': CONFIG.data.target_P,
-        'group_col': CONFIG.data.group_col,
         'n_splits': CONFIG.cv.n_splits,
         'random_seed': CONFIG.cv.random_seed,
         'output_dir': CONFIG.output.output_dir,
@@ -374,15 +311,16 @@ def get_config_dict() -> Dict[str, Any]:
                 'learning_rate': CONFIG.model.catboost.learning_rate,
                 'loss_function': CONFIG.model.catboost.loss_function,
                 'task_type': CONFIG.model.catboost.task_type,
+                'gpu_devices': CONFIG.model.catboost.gpu_devices,
             },
             'stacking': CONFIG.model.stacking,  # Stacking: inner_cv=5
+            'stacking_base_defaults': CONFIG.model.stacking_base_defaults,
             'rf': CONFIG.model.rf,              # RandomForest: n_estimators=200, max_depth=15
         },
 
         # === 数据增强配置（基于 Ágreda-López 2024，不建议随意修改）===
         'augmentation': {
             'n_aug': CONFIG.augmentation.n_aug,  # 每样本增强副本数，默认 15
-            'error_model': CONFIG.augmentation.error_model,
         },
 
         # === MC 不确定性配置 ===
