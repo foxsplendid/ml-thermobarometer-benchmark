@@ -263,6 +263,127 @@ def save_figure(fig: plt.Figure, filepath: str, dpi: int = 150) -> None:
 
 
 # ============================================================
+# 稳定性可视化
+# ============================================================
+
+def plot_stability_overview(stability_T: pd.DataFrame,
+                            stability_P: pd.DataFrame,
+                            metrics: Tuple[str, ...] = ("rmse", "mae", "mbe"),
+                            bins: int = 30,
+                            figsize: Tuple[int, int] = (12, 10),
+                            title: Optional[str] = None) -> plt.Figure:
+    """
+    稳定性分布图（重复实验）
+
+    以分布形式展示重复实验的波动范围，便于观察稳定性。
+    """
+    _check_plotting_available()
+
+    unit_map = {"T": "℃", "P": "kbar"}
+    colors = {"T": "#1f77b4", "P": "#ff7f0e"}
+    unitless = {"r2", "slope", "bins_merged", "n_splits_requested", "n_splits_used",
+                "n_bins_raw", "n_bins_merged", "repeat_id"}
+
+    def _metric_label(metric: str, unit: str) -> str:
+        label = metric.replace("_", " ").upper()
+        if metric in unitless:
+            return label
+        return f"{label} ({unit})"
+
+    metrics = tuple(metrics)
+    n_rows = len(metrics)
+    fig, axes = plt.subplots(n_rows, 2, figsize=figsize, squeeze=False)
+
+    for col, (target_name, df) in enumerate([("T", stability_T), ("P", stability_P)]):
+        unit = unit_map.get(target_name, "")
+        for row, metric in enumerate(metrics):
+            ax = axes[row, col]
+            if metric not in df.columns:
+                raise ValueError(f"stability metric column missing: {metric}")
+
+            values = df[metric].dropna().values
+            if values.size == 0:
+                ax.set_title(f"{target_name} {metric.upper()} (empty)")
+                ax.set_axis_off()
+                continue
+
+            sns.histplot(values, bins=bins, kde=True, stat="density",
+                         color=colors[target_name], alpha=0.6, ax=ax)
+
+            mean_val = float(np.mean(values))
+            std_val = float(np.std(values))
+            ax.axvline(mean_val, color="black", linestyle="--", linewidth=1.2)
+
+            label = _metric_label(metric, unit)
+            ax.set_title(f"{target_name} {label}")
+            ax.set_xlabel(label)
+            ax.set_ylabel("Density")
+            ax.text(
+                0.98, 0.95,
+                f"mean={mean_val:.2f}\nstd={std_val:.2f}",
+                transform=ax.transAxes,
+                fontsize=9,
+                verticalalignment="top",
+                horizontalalignment="right",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+            )
+
+    if title:
+        fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
+
+    plt.tight_layout()
+    return fig
+
+
+# ============================================================
+# 学习曲线可视化
+# ============================================================
+
+def plot_learning_curve(summary_df: pd.DataFrame,
+                        target: str = "T",
+                        figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
+    """
+    学习曲线图（基于汇总统计）
+    """
+    _check_plotting_available()
+
+    df = summary_df[summary_df["target"] == target].copy()
+    if df.empty:
+        raise ValueError(f"learning curve summary missing target: {target}")
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    models = df["model"].unique()
+    colors = {"ert": "#1f77b4", "stacking": "#ff7f0e", "catboost": "#2ca02c"}
+    markers = {"ert": "o", "stacking": "s", "catboost": "^"}
+
+    for model in models:
+        model_df = df[df["model"] == model].sort_values("fraction")
+        x = model_df["n_train_sub_mean"].values
+        y = model_df["rmse_mean_of_repeats"].values
+        yerr = model_df["rmse_std_of_repeats"].values
+
+        color = colors.get(model, "gray")
+        marker = markers.get(model, "o")
+
+        ax.errorbar(
+            x, y, yerr=yerr, label=model.upper(),
+            color=color, marker=marker, capsize=3, linewidth=2, markersize=8
+        )
+
+    ax.set_xlabel("Training Samples", fontsize=12)
+    ylabel = "RMSE (°C)" if target == "T" else "RMSE (kbar)"
+    ax.set_ylabel(ylabel, fontsize=12)
+    title = f"Learning Curve - {'Temperature' if target == 'T' else 'Pressure'}"
+    ax.set_title(title, fontsize=14)
+    ax.legend(loc="upper right", fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    return fig
+
+
+# ============================================================
 # 四个核心可视化函数（论文级）
 # ============================================================
 
@@ -290,6 +411,8 @@ def plot_correction_effect(preds_df: pd.DataFrame,
         保存路径
     figsize : tuple
         图形大小
+    random_seed : int, optional
+        设置抖动随机种子，为 None 时不固定
     """
     from .metrics import compute_slope_intercept, rmse
 
@@ -589,7 +712,8 @@ def plot_feature_set_comparison_boxplot(metrics_df: pd.DataFrame,
                                         target: str = 'T',
                                         metric: str = 'rmse',
                                         save_path: Optional[str] = None,
-                                        figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
+                                        figsize: Tuple[int, int] = (8, 6),
+                                        random_seed: Optional[int] = 42) -> plt.Figure:
     """
     图 3-3：特征集效能对比箱线图
 
@@ -607,6 +731,8 @@ def plot_feature_set_comparison_boxplot(metrics_df: pd.DataFrame,
         保存路径
     figsize : tuple
         图形大小
+    random_seed : int, optional
+        设置抖动随机种子，为 None 时不固定
     """
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -637,8 +763,10 @@ def plot_feature_set_comparison_boxplot(metrics_df: pd.DataFrame,
         patch.set_alpha(0.7)
 
     # 添加散点
+    rng = np.random.RandomState(random_seed) if random_seed is not None else np.random
+
     for i, (data, pos) in enumerate(zip(box_data, positions)):
-        jitter = np.random.uniform(-0.15, 0.15, len(data))
+        jitter = rng.uniform(-0.15, 0.15, len(data))
         ax.scatter(pos + jitter, data, alpha=0.4, s=20, color=colors_box[i], edgecolors='none')
 
     # 标注均值

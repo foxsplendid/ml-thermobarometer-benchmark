@@ -7,9 +7,11 @@ This script only reads existing files under results/ and generates figures.
 No model training is performed.
 """
 import argparse
+import logging
 import os
 import sys
 from typing import Dict, List, Optional
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -19,7 +21,9 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from config import get_config_dict
 from src.protocol import _merge_sparse_bins
+from src.logger import setup_logging, get_logger
 from src.viz import (
     plot_pred_vs_true,
     plot_residuals,
@@ -28,6 +32,8 @@ from src.viz import (
     plot_correction_effect,
     plot_residual_distribution_comparison,
     plot_feature_importance,
+    plot_learning_curve,
+    plot_stability_overview,
     save_figure,
     # V5.1 新增绘图函数（论文图件）
     plot_pt_grid_cv_splits,
@@ -42,6 +48,8 @@ try:
     HAS_JOBLIB = True
 except ImportError:
     HAS_JOBLIB = False
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_dir(path: str) -> None:
@@ -93,6 +101,22 @@ def _load_metrics_summary(results_dir: str) -> Optional[pd.DataFrame]:
     if "exp_id" in df.columns and "exp_name" not in df.columns:
         df = df.rename(columns={"exp_id": "exp_name"})
     return df
+
+
+def _load_stability_metrics(results_dir: str, exp_id: str, target: str) -> Optional[pd.DataFrame]:
+    path = os.path.join(results_dir, "stability", f"{exp_id}_{target}_test_metrics.csv")
+    if not os.path.exists(path):
+        print(f"skip: missing {path}")
+        return None
+    return pd.read_csv(path)
+
+
+def _load_learning_curve_summary(learning_curve_dir: str) -> Optional[pd.DataFrame]:
+    path = os.path.join(learning_curve_dir, "learning_curve_summary.csv")
+    if not os.path.exists(path):
+        print(f"skip: missing {path}")
+        return None
+    return pd.read_csv(path)
 
 
 def _load_model(results_dir: str, exp_id: str, target: str) -> Optional[Dict]:
@@ -360,6 +384,34 @@ def _plot_heatmap_matrix(results_dir: str, fig_dir: str) -> None:
             print(f"skip: performance_heatmap_{target} error: {e}")
 
 
+def _plot_stability(stability_exp_id: Optional[str], results_dir: str, fig_dir: str) -> None:
+    """稳定性分布图（重复实验）"""
+    if not stability_exp_id:
+        return
+    df_T = _load_stability_metrics(results_dir, stability_exp_id, "T")
+    df_P = _load_stability_metrics(results_dir, stability_exp_id, "P")
+    if df_T is None or df_P is None:
+        return
+    try:
+        fig = plot_stability_overview(df_T, df_P, metrics=("rmse", "mae", "mbe"))
+        _save_any(fig, os.path.join(fig_dir, f"{stability_exp_id}_stability_overview.png"))
+    except Exception as e:
+        print(f"skip: stability overview error: {e}")
+
+
+
+def _plot_learning_curve(learning_curve_dir: str, fig_dir: str) -> None:
+    """学习曲线分布图（汇总）"""
+    summary_df = _load_learning_curve_summary(learning_curve_dir)
+    if summary_df is None:
+        return
+    for target in ["T", "P"]:
+        try:
+            fig = plot_learning_curve(summary_df, target=target)
+            _save_any(fig, os.path.join(fig_dir, f"learning_curve_{target}.png"))
+        except Exception as e:
+            print(f"skip: learning curve {target} error: {e}")
+
 
 def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> None:
     """图 3-2：P-T 空间网格分层 CV 示意图"""
@@ -406,10 +458,14 @@ def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Non
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Offline figure generation for paper.")
-    parser.add_argument("--results-dir", default="results")
+    base_config = get_config_dict()
+    parser.add_argument("--results-dir", default=base_config["output_dir"])
     parser.add_argument("--exp-id", default="E07_ert_augmented_none_liq")
     parser.add_argument("--fig-subdir", default="figures")
-    parser.add_argument("--data-path", default="input.csv")
+    parser.add_argument("--data-path", default=base_config["data_path"])
+    parser.add_argument("--stability-exp-id", default="E07_stability_nj4")
+    parser.add_argument("--learning-curve-dir",
+                        default=os.path.join(base_config["output_dir"], "learning_curve"))
     args = parser.parse_args()
 
     fig_dir = os.path.join(args.results_dir, args.fig_subdir)
@@ -427,10 +483,25 @@ def main() -> int:
     _plot_stepwise(args.results_dir, fig_dir)             # 图 3-5
     _plot_heatmap_matrix(args.results_dir, fig_dir)       # 图 3-6
     _plot_residual_compare(args.results_dir, fig_dir)     # 残差对比
+    _plot_stability(args.stability_exp_id, args.results_dir, fig_dir)
+    _plot_learning_curve(args.learning_curve_dir, fig_dir)
 
     print(f"plots saved under {fig_dir}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    def _init_logging():
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_filename = f"plot_offline_figures_{timestamp}_{os.getpid()}.log"
+        setup_logging(log_filename=log_filename)
+        global logger
+        logger = get_logger(__name__)
+
+    _init_logging()
+    try:
+        exit_code = main()
+    except Exception:
+        logger.exception("离线绘图运行异常")
+        raise
+    sys.exit(exit_code)

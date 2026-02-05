@@ -99,7 +99,7 @@ class MCUncertaintyEstimator(UncertaintyModule):
         percentiles = mc_params.get('percentiles', self.percentiles) if mc_params else self.percentiles
         feature_names = mc_params.get('feature_names', self.feature_names) if mc_params else self.feature_names
 
-        # 获取特征列名（如果未指定，根据维度推断）
+        # 未显式传入时按特征数推断（9/18），未知则报错
         if feature_names is None:
             if X.shape[1] == 18:
                 from config import DataConfig
@@ -108,11 +108,11 @@ class MCUncertaintyEstimator(UncertaintyModule):
                 from config import DataConfig
                 feature_names = DataConfig().feature_sets['NoLiquid']
             else:
-                # 未知维度，使用默认 3% 误差
-                feature_names = [f'feature_{i}' for i in range(X.shape[1])]
+                raise ValueError(f"无法根据特征数推断 feature_names，n_features={X.shape[1]}")
 
-        # 获取按列名映射的相对误差向量
-        rel_err_vec = get_rel_err_vector(feature_names)
+        if len(feature_names) != X.shape[1]:
+            raise ValueError("feature_names 长度必须与 X 的特征维度一致")
+        rel_err_vec = get_rel_err_vector(feature_names, strict=True)
 
         n_samples = X.shape[0]
         predictions = np.zeros((n_mc, n_samples))

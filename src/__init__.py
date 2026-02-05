@@ -2,7 +2,7 @@
 """
 Chapter 3 Benchmark Protocol - 模块导出
 
-机器学习温压计模块化验证框架 v6.0
+机器学习温压计模块化验证框架 v7.3.0
 """
 
 # ============================================================
@@ -79,7 +79,6 @@ from .protocol import (
     StratifiedCVProtocol,
     ExperimentConfig,
     ExperimentMatrix,
-    compute_all_metrics,
 )
 
 # ============================================================
@@ -90,6 +89,7 @@ from .metrics import (
     mae,
     r2,
     compute_metrics,
+    compute_all_metrics,
     compute_slope_intercept,
     compute_bias_stats,
     summarize_folds,  # 直接从 metrics 导出，避免间接导出链
@@ -98,5 +98,5 @@ from .metrics import (
 # ============================================================
 # 版本信息
 # ============================================================
-__version__ = '7.0.0'
+__version__ = '7.3.0'
 __author__ = 'ML Thermobarometer Benchmark Protocol'

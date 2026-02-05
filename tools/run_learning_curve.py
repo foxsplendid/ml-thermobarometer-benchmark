@@ -35,10 +35,10 @@
        python tools/run_learning_curve.py --repeats 30 --resume
 
 输出：
-    results/learning_curve_runs.csv      # 每次 repeat 的原始记录
-    results/learning_curve_summary.csv   # 汇总统计（mean/std/CI）
-    results/figures/learning_curve_T.png # 温度学习曲线图（可选）
-    results/figures/learning_curve_P.png # 压力学习曲线图（可选）
+    results/learning_curve/learning_curve_runs.csv    # 每次 repeat 的原始记录
+    results/learning_curve/learning_curve_summary.csv # 汇总统计（mean/std/CI）
+    results/figures/learning_curve_T.png              # 使用离线绘图脚本生成
+    results/figures/learning_curve_P.png              # 使用离线绘图脚本生成
 
 注意：
     - 严格防泄露：所有拟合/标准化在训练折内完成
@@ -48,10 +48,12 @@
 
 import argparse
 import glob
+import logging
 import os
 import sys
 import time
 import warnings
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -74,10 +76,55 @@ from src.protocol import (
     StratifiedCVProtocol,
     _merge_sparse_bins,
     _get_effective_n_splits,
+    _derive_target_seed,
 )
+from src.logger import setup_logging, get_logger
 
 # 从集中配置获取
 BASE_CONFIG = get_config_dict()
+OUTPUT_SUBDIR = "learning_curve"
+logger = logging.getLogger(__name__)
+
+
+def _build_model_params(base_config: dict, model_module: str, random_seed: int) -> dict:
+    model_defaults = base_config["model_defaults"]
+    name = model_module.lower()
+
+    if name in {"ert", "extratrees"}:
+        params = dict(model_defaults["ert"])
+    elif name in {"rf", "randomforest"}:
+        params = dict(model_defaults["rf"])
+    elif name in {"catboost", "cb"}:
+        params = dict(model_defaults["catboost"])
+    elif name == "stacking":
+        stacking_params = dict(model_defaults.get("stacking", {}))
+        base_params = {
+            "ert": dict(model_defaults["ert"]),
+            "catboost": dict(model_defaults["catboost"]),
+            "rf": dict(model_defaults["rf"]),
+        }
+        for key, override in model_defaults.get("stacking_base_defaults", {}).items():
+            if key in base_params and isinstance(override, dict):
+                base_params[key].update(override)
+        params = {"base_model_params": base_params}
+        if stacking_params:
+            params.update({
+                "inner_cv": stacking_params.get("inner_cv"),
+                "use_meta_scaler": stacking_params.get("use_meta_scaler"),
+            })
+    else:
+        params = {}
+
+    params["random_seed"] = random_seed
+    return params
+
+
+def _build_data_params(base_config: dict, data_module: str, feature_set: str, random_seed: int) -> dict:
+    params = {"random_seed": random_seed}
+    if data_module.lower() == "augmented":
+        params["feature_names"] = base_config["feature_sets"][feature_set]
+        params["n_aug"] = base_config["augmentation"]["n_aug"]
+    return params
 
 
 def summarize_runs(runs_df: pd.DataFrame, requested_n_splits: int) -> pd.DataFrame:
@@ -113,17 +160,30 @@ def summarize_runs(runs_df: pd.DataFrame, requested_n_splits: int) -> pd.DataFra
 
         n_splits_used_unique = group['n_splits_used'].unique() if 'n_splits_used' in group else np.array([])
         n_effective_bins_mean = group['n_effective_bins'].mean() if 'n_effective_bins' in group else np.nan
+        n_splits_used_min = np.nan
+        n_splits_used_max = np.nan
+        n_splits_used_mean = np.nan
+        bins_merged_ratio = np.nan
         notes = ""
         if len(n_splits_used_unique) > 0:
             min_splits_used = int(np.min(n_splits_used_unique))
             if len(n_splits_used_unique) > 1 or min_splits_used < n_splits_requested:
                 notes = f"n_splits_downgraded_to_{min_splits_used}"
+            n_splits_used_min = min_splits_used
+            n_splits_used_max = int(np.max(n_splits_used_unique))
+            n_splits_used_mean = float(group['n_splits_used'].mean())
+        if 'bins_merged' in group:
+            bins_merged_ratio = float(group['bins_merged'].mean())
 
         summary_records.append({
             'fraction': fraction,
             'model': model,
             'target': target,
             'n_train_sub_mean': group['n_train_sub'].mean() if 'n_train_sub' in group else np.nan,
+            'n_splits_requested': n_splits_requested,
+            'n_splits_used_min': n_splits_used_min,
+            'n_splits_used_max': n_splits_used_max,
+            'n_splits_used_mean': n_splits_used_mean,
             'n_valid_repeats': n_valid,
             'rmse_mean_of_repeats': rmse_mean_of_repeats,
             'rmse_std_of_repeats': rmse_std_of_repeats,
@@ -132,6 +192,7 @@ def summarize_runs(runs_df: pd.DataFrame, requested_n_splits: int) -> pd.DataFra
             'r2_mean_of_repeats': r2_mean_of_repeats,
             'r2_std_of_repeats': r2_std_of_repeats,
             'n_effective_bins_mean': n_effective_bins_mean,
+            'bins_merged_ratio': bins_merged_ratio,
             'notes': notes,
         })
 
@@ -214,8 +275,12 @@ def run_cv_for_subsample(
     result : dict
         包含 summary（汇总指标）和 n_splits_used（实际使用的折数）
     """
+    n_bins_raw = len(np.unique(strat_labels_sub)) if strat_labels_sub is not None else 0
+
     # 合并稀疏 bins（阈值设为 n_splits，确保每个 bin 能支持分层CV）
     merged_labels = merge_sparse_bins(strat_labels_sub, min_samples_per_bin=n_splits)
+    n_bins_merged = len(np.unique(merged_labels)) if merged_labels is not None else 0
+    bins_merged = int(n_bins_raw > 0 and n_bins_merged < n_bins_raw)
 
     # 计算有效 n_splits
     effective_n_splits = get_effective_n_splits(len(X_sub), merged_labels, n_splits)
@@ -244,10 +309,20 @@ def run_cv_for_subsample(
         'summary': summary,
         'n_splits_used': n_splits_used,
         'n_effective_bins': len(np.unique(merged_labels)),
+        'n_bins_raw': n_bins_raw,
+        'n_bins_merged': n_bins_merged,
+        'bins_merged': bins_merged,
     }
 
 
-def create_pipeline_factory(data_module_name: str, model_module_name: str, corr_module_name: str, base_seed: int):
+def create_pipeline_factory(
+    data_module_name: str,
+    model_module_name: str,
+    corr_module_name: str,
+    base_seed: int,
+    feature_set: str,
+    base_config: dict,
+):
     """
     创建 Pipeline 工厂函数
 
@@ -261,6 +336,10 @@ def create_pipeline_factory(data_module_name: str, model_module_name: str, corr_
         校正模块名称
     base_seed : int
         基础随机种子
+    feature_set : str
+        特征集名称，用于传递 feature_names
+    base_config : dict
+        get_config_dict() 返回的配置字典
 
     Returns
     -------
@@ -269,8 +348,10 @@ def create_pipeline_factory(data_module_name: str, model_module_name: str, corr_
     """
     def factory(seed: Optional[int] = None):
         seed_value = base_seed if seed is None else seed
-        data_mod = get_data_module(data_module_name, random_seed=seed_value)
-        model_mod = get_model_module(model_module_name, random_seed=seed_value)
+        data_params = _build_data_params(base_config, data_module_name, feature_set, seed_value)
+        model_params = _build_model_params(base_config, model_module_name, seed_value)
+        data_mod = get_data_module(data_module_name, **data_params)
+        model_mod = get_model_module(model_module_name, **model_params)
         corr_mod = get_correction_module(corr_module_name)
         return Pipeline(data_mod, model_mod, corr_mod)
     return factory
@@ -449,12 +530,18 @@ def run_learning_curve(
 
             for model_name in models:
                 # 创建 pipeline 工厂
-                pipeline_factory = create_pipeline_factory(
-                    data_module_name, model_name, corr_module_name, repeat_seed
-                )
                 corr_module = get_correction_module(corr_module_name)
 
                 for target_name, y_full in targets:
+                    target_seed = _derive_target_seed(repeat_seed, target_name)
+                    pipeline_factory = create_pipeline_factory(
+                        data_module_name,
+                        model_name,
+                        corr_module_name,
+                        target_seed,
+                        feature_set,
+                        BASE_CONFIG,
+                    )
                     current_iter += 1
 
                     # 检查是否已完成
@@ -474,7 +561,7 @@ def run_learning_curve(
                     # 运行 CV
                     cv_result = run_cv_for_subsample(
                         X_sub, y_sub, strat_labels_sub,
-                        pipeline_factory, corr_module, n_splits, repeat_seed
+                        pipeline_factory, corr_module, n_splits, target_seed
                     )
 
                     summary = cv_result['summary']
@@ -491,6 +578,9 @@ def run_learning_curve(
                         'n_splits_used': cv_result['n_splits_used'],
                         'n_splits_requested': n_splits,
                         'n_effective_bins': cv_result['n_effective_bins'],
+                        'n_bins_raw': cv_result['n_bins_raw'],
+                        'n_bins_merged': cv_result['n_bins_merged'],
+                        'bins_merged': cv_result['bins_merged'],
                         'n_train_full': n_train_full,
                         'n_train_sub': n_train_sub,
                         'rmse_mean': summary.get('rmse_mean', np.nan),
@@ -529,65 +619,6 @@ def run_learning_curve(
 # ============================================================
 # 绘图函数（可选）
 # ============================================================
-
-def plot_learning_curve(summary_df: pd.DataFrame, output_dir: str, target: str = 'T') -> None:
-    """
-    绘制学习曲线图
-
-    Parameters
-    ----------
-    output_dir : str
-        输出目录
-    target : str
-        目标名称 ('T' 或 'P')
-    """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("  警告: matplotlib 未安装，跳过绘图")
-        return
-
-    fig_dir = os.path.join(output_dir, 'figures')
-    os.makedirs(fig_dir, exist_ok=True)
-
-    # 筛选目标
-    df = summary_df[summary_df['target'] == target].copy()
-    if df.empty:
-        print(f"  警告: 目标 {target} 无数据，跳过绘图")
-        return
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    models = df['model'].unique()
-    colors = {'ert': '#1f77b4', 'stacking': '#ff7f0e', 'catboost': '#2ca02c'}
-    markers = {'ert': 'o', 'stacking': 's', 'catboost': '^'}
-
-    for model in models:
-        model_df = df[df['model'] == model].sort_values('fraction')
-        x = model_df['n_train_sub_mean'].values
-        y = model_df['rmse_mean_of_repeats'].values
-        yerr = model_df['rmse_std_of_repeats'].values
-
-        color = colors.get(model, 'gray')
-        marker = markers.get(model, 'o')
-
-        ax.errorbar(x, y, yerr=yerr, label=model.upper(),
-                    color=color, marker=marker, capsize=3, linewidth=2, markersize=8)
-
-    ax.set_xlabel('Training Samples', fontsize=12)
-    ylabel = 'RMSE (°C)' if target == 'T' else 'RMSE (kbar)'
-    ax.set_ylabel(ylabel, fontsize=12)
-    title = f'Learning Curve - {"Temperature" if target == "T" else "Pressure"}'
-    ax.set_title(title, fontsize=14)
-    ax.legend(loc='upper right', fontsize=10)
-    ax.grid(True, alpha=0.3)
-
-    # 保存
-    fig_path = os.path.join(fig_dir, f'learning_curve_{target}.png')
-    fig.savefig(fig_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  图表已保存: {fig_path}")
-
 
 # ============================================================
 # 命令行入口
@@ -640,7 +671,7 @@ def main():
     parser.add_argument('--repeat-end', type=int, default=None,
                         help='repeat end (inclusive), for segmented runs')
     parser.add_argument('--merge-dir', type=str, default=None,
-                        help='merge runs from directory and finalize summary/plots')
+                        help='merge runs from directory and finalize summary')
     parser.add_argument('--n-splits', type=int, default=10,
                         help='交叉验证折数（默认: 10）')
 
@@ -648,7 +679,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子（默认: 42）')
     parser.add_argument('--output-dir', type=str, default=None,
-                        help='输出目录（默认: results）')
+                        help='输出目录（默认: results/learning_curve）')
 
     # 断点续跑选项
     parser.add_argument('--resume', action='store_true',
@@ -658,7 +689,7 @@ def main():
 
     # 绘图选项
     parser.add_argument('--no-plot', action='store_true',
-                        help='不绘制学习曲线图')
+                        help='已废弃：绘图移至 tools/plot_offline_figures.py')
 
     args = parser.parse_args()
 
@@ -681,7 +712,7 @@ def main():
     feature_set = 'Liquid' if args.feature_set.lower() in ['liq', 'liquid'] else 'NoLiquid'
 
     # 输出目录
-    output_dir = args.output_dir if args.output_dir else BASE_CONFIG['output_dir']
+    output_dir = args.output_dir if args.output_dir else os.path.join(BASE_CONFIG['output_dir'], OUTPUT_SUBDIR)
     os.makedirs(output_dir, exist_ok=True)
 
     if args.merge_dir:
@@ -702,10 +733,7 @@ def main():
         print(f"  runs: {runs_path}")
         print(f"  summary: {summary_path}")
 
-        if not args.no_plot:
-            print("\nPlotting learning curves...")
-            plot_learning_curve(summary_df, output_dir, target="T")
-            plot_learning_curve(summary_df, output_dir, target="P")
+        print("  图表生成请使用 tools/plot_offline_figures.py")
 
         return runs_df, summary_df
 
@@ -792,10 +820,7 @@ def main():
     print(f"  summary: {summary_path}")
 
     # 绘图
-    if not args.no_plot:
-        print("\nPlotting learning curves...")
-        plot_learning_curve(summary_df, output_dir, target='T')
-        plot_learning_curve(summary_df, output_dir, target='P')
+    print("  图表生成请使用 tools/plot_offline_figures.py")
 
     # 打印汇总
     print("\n" + "=" * 70)
@@ -821,4 +846,16 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    def _init_logging():
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_filename = f"learning_curve_{timestamp}_{os.getpid()}.log"
+        setup_logging(log_filename=log_filename)
+        global logger
+        logger = get_logger(__name__)
+
+    _init_logging()
+    try:
+        main()
+    except Exception:
+        logger.exception("学习曲线运行异常")
+        raise
