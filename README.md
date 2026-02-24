@@ -497,19 +497,36 @@ python tools/run_error_propagation.py --corr-module segmented
 # 自定义特征名（非9/18特征时必须指定）
 python tools/run_error_propagation.py --feature-names "@feature_names.json"
 ```
-### plot_offline_figures.py - 离线绘图
+### plot_offline_figures.py - 离线绘图（V7.4）
 
-**输入参数**：
+**输入参数**
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--results-dir` | `results` | 结果目录 |
-| `--exp-id` | `E07_ert_augmented_none_liq` | 默认实验 |
+| `--exp-id` | `E07_ert_augmented_none_liq` | SHAP/模型相关默认实验 |
 | `--data-path` | `input.csv` | 数据路径 |
-| `--stability-exp-id` | `E07_stability_nj4` | 稳定性实验ID（用于绘图） |
-| `--learning-curve-dir` | `results/learning_curve` | 学习曲线结果目录 |
-| `--fig-subdir` | `figures` | 图表输出子目录 |
+| `--stability-exp-id` | `E07_stability_nj4` | 稳定性实验 ID（全量绘图模式） |
+| `--learning-curve-dir` | `results/learning_curve` | 学习曲线汇总目录 |
+| `--fig-subdir` | `figures` | 图件输出子目录（默认输出到 `results/figures`） |
+| `--correction-delta-exp-id` | `E10_ert_augmented_segmented_liq` | correction-delta 图使用的预测文件前缀 |
+| `--enable-shap` | `False` | 是否启用 SHAP 绘图 |
+| `--shap-max-samples` | `300` | SHAP 最大采样样本数 |
+| `--shap-bg-k` | `50` | Kernel SHAP 背景聚类数 |
+| `--shap-force` | `False` | 已存在 SHAP 图时是否强制覆盖 |
+| `--selected-only` | `False` | 仅生成保留图件集合 |
 
-**输出**：论文图件 3-2 至 3-6、基础诊断图、稳定性分布图、学习曲线图
+**保留图件模式（`--selected-only`）输出**
+- `pt_sampling_bias_overview.png`
+- `parity_compare_TP.png`
+- `learning_curve_TP.png`
+- `{exp_id}_TP_SHAP_combined_{ModelName}.png`（启用 `--enable-shap` 时）
+- `correction_delta_scatter_TP.png`
+
+**关键函数行为（当前版本）**
+- `plot_combined_shap_summary`：BayesV5 风格 SHAP dot+bar 叠加图；离线流程默认关闭总标题，保留坐标轴标题。
+- `_plot_shap` + `_merge_shap_tp_images`：先生成 T/P，再合并成 TP；默认清理 SHAP 中间单图。
+- `_plot_parity_compare` / `_plot_learning_curve`：生成 T/P 后合并为 `*_TP.png`，并在保留图件模式下清理中间单图。
+- `plot_correction_delta_scatter_tp`：默认纯白背景，仅输出 PNG（无 JPG 流程），适配 Word 白底粘贴。
 
 ---
 
@@ -727,6 +744,16 @@ python tools/run_error_propagation.py --feature-names "@feature_names.json"
 ---
 # 第四部分：变更日志
 
+### V7.4.0 - 保留图件流程收敛与可视化一致性
+
+- 仅保留并收敛 5 张核心图件输出：`pt_sampling_bias_overview`、`parity_compare_TP`、`learning_curve_TP`、`E07_ert_augmented_none_liq_TP_SHAP_combined_ExtraTreesRegressor`、`correction_delta_scatter_TP`。
+- 新增 `--selected-only` 流程：仅生成上述保留图件，并将输出统一落盘到 `results/{fig-subdir}`（默认 `results/figures`）。
+- SHAP 绘图迁移为 BayesV5 参考画法：`plot_combined_shap_summary` 采用 dot+bar 叠加；离线流程默认去除总标题，保留坐标轴标题。
+- SHAP 合并策略固定为 TP 主图输出，默认清理中间 T/P 单图，避免中间产物残留。
+- `correction_delta_scatter_TP` 重构为参考实现样式：联合散点 + 平滑趋势 + 95% 区间 + 分段边界（q33/q67）；背景统一纯白，默认仅输出 PNG。
+- 新增/扩展离线绘图参数：`--enable-shap`、`--shap-max-samples`、`--shap-bg-k`、`--shap-force`、`--correction-delta-exp-id`。
+- 清理测试输出约定：不再将最终图件落到测试子目录，统一汇入 `results/figures`。
+
 ### V7.3.0 - 误差链路统一与随机隔离
 
 - MBE 定义统一为 `y_true - y_pred`（正值代表低估）
@@ -805,6 +832,7 @@ python tools/run_error_propagation.py --feature-names "@feature_names.json"
 
 | 版本   | 日期 | 主要变更 |
 |------|------|----------|
+| V7.4.0 | 2026-02-24 | 保留5图流程、SHAP画法迁移、Correction Delta白底PNG、输出统一到figures |
 | V7.3.0 | 2026-02-03 | 误差链路统一、随机隔离、特征名严格推断 |
 | V7.2.0 | 2026-02-03 | 配置单一源、参数链路统一、指标口径合并 |
 | V7.1 | 2026-02-02 | 接口清理：移除未使用的 groups 参数、版本号同步至 7.2.0 |

@@ -7,7 +7,7 @@
 
 import numpy as np
 import pandas as pd
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple
 
 # 可视化库导入保护
 try:
@@ -1056,6 +1056,327 @@ def plot_performance_heatmap_matrix(metrics_df: pd.DataFrame,
 # ============================================================
 # 使用示例
 # ============================================================
+
+def plot_combined_shap_summary(shap_values: Any,
+                               X: Any,
+                               model_name: str = "Model",
+                               max_display: int = 20,
+                               figsize: Tuple[int, int] = (12, 10),
+                               font_size: int = 12,
+                               show_suptitle: bool = True,
+                               show_bottom_axis_labels: bool = True) -> plt.Figure:
+    """
+    Draw combined SHAP dot+bar summary following BayesV5 notebook style.
+    """
+    _check_plotting_available()
+
+    try:
+        import shap as shap_lib
+    except Exception as e:
+        raise ImportError(f"SHAP is required for plot_combined_shap_summary: {e}")
+
+    if isinstance(X, pd.DataFrame):
+        x_df = X.copy()
+    else:
+        x_arr = np.asarray(X)
+        if x_arr.ndim != 2:
+            raise ValueError("X must be a 2D array-like for SHAP plotting")
+        x_df = pd.DataFrame(x_arr, columns=[f"Feature_{i}" for i in range(x_arr.shape[1])])
+
+    # Keep the notebook defaults when caller does not override.
+    if max_display is None:
+        max_display = 22 if "Meta" not in model_name else 6
+    if figsize is None:
+        figsize = (12, 10) if "Meta" not in model_name else (12, 6)
+
+    alpha = 0.4
+    dpi = 300
+    show_colorbar = True
+
+    fig, ax1 = plt.subplots(figsize=figsize, dpi=dpi)
+    _ = ax1  # Placeholder to keep variable naming aligned with notebook style.
+
+    title_name = model_name
+    # Remove trailing short hash suffix if present (e.g., "_a1b2c3d4").
+    if "_" in model_name:
+        suffix = model_name.rsplit("_", 1)[-1]
+        if len(suffix) == 8 and suffix.isalnum():
+            title_name = model_name.rsplit("_", 1)[0]
+
+    if show_suptitle:
+        plt.suptitle(f"SHAP Analysis for {title_name}", fontsize=font_size + 2, y=0.98)
+
+    shap_lib.summary_plot(
+        shap_values,
+        x_df,
+        plot_type="dot",
+        feature_names=x_df.columns,
+        max_display=max_display,
+        show=False,
+        color_bar=show_colorbar,
+    )
+    plt.gca().set_position([0.5, 0.5, 0.65, 0.65])
+    ax1 = plt.gca()
+
+    ax2 = ax1.twiny()
+    _ = ax2
+    shap_lib.summary_plot(
+        shap_values,
+        x_df,
+        plot_type="bar",
+        feature_names=x_df.columns,
+        max_display=max_display,
+        show=False,
+    )
+    plt.gca().set_position([0.5, 0.5, 0.65, 0.65])
+    ax2 = plt.gca()
+
+    for bar in ax2.patches:
+        bar.set_alpha(alpha)
+
+    if show_bottom_axis_labels:
+        ax1.set_xlabel("SHAP Value Contribution (Bee Swarm)", fontsize=font_size)
+        ax2.set_xlabel("Mean SHAP Value (Feature Importance)", fontsize=font_size)
+    else:
+        ax1.set_xlabel("")
+        ax2.set_xlabel("")
+    ax1.set_ylabel("Features", fontsize=font_size)
+    ax2.xaxis.set_label_position('top')
+    ax2.xaxis.tick_top()
+
+    plt.tight_layout()
+    if show_suptitle:
+        plt.subplots_adjust(top=0.92)
+    else:
+        plt.subplots_adjust(top=0.96)
+    return fig
+
+
+def plot_correction_delta_scatter_tp(t_true: np.ndarray,
+                                     t_pred_raw: np.ndarray,
+                                     t_pred_corr: np.ndarray,
+                                     p_true: np.ndarray,
+                                     p_pred_raw: np.ndarray,
+                                     p_pred_corr: np.ndarray,
+                                     title: str = "Segmented Correction Effect",
+                                     t_unit: str = r"$^\circ$C",
+                                     p_unit: str = "kbar",
+                                     bg_color: str = "#ffffff",
+                                     figsize: Tuple[int, int] = (12, 12.6)) -> plt.Figure:
+    """
+    Plot correction-delta figure with joint panels for T/P.
+    Layout and styling follow the provided reference implementation.
+    """
+    _check_plotting_available()
+
+    t_true = np.asarray(t_true).ravel()
+    t_pred_raw = np.asarray(t_pred_raw).ravel()
+    t_pred_corr = np.asarray(t_pred_corr).ravel()
+    p_true = np.asarray(p_true).ravel()
+    p_pred_raw = np.asarray(p_pred_raw).ravel()
+    p_pred_corr = np.asarray(p_pred_corr).ravel()
+
+    if not (len(t_true) == len(t_pred_raw) == len(t_pred_corr)):
+        raise ValueError("T arrays must have the same length")
+    if not (len(p_true) == len(p_pred_raw) == len(p_pred_corr)):
+        raise ValueError("P arrays must have the same length")
+
+    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    t_delta = t_pred_corr - t_pred_raw
+    p_delta = p_pred_corr - p_pred_raw
+
+    t_color = "#d95f02"
+    p_color = "#2c7fb8"
+    trend_color = "#d62728"
+    ci_color = "#cfcfcf"
+    boundary_color = "#111111"
+
+    def _kernel_smooth_with_ci(x: np.ndarray, y: np.ndarray, n_grid: int = 320):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        n = len(x)
+        if n < 10:
+            order = np.argsort(x)
+            xs = x[order]
+            ys = y[order]
+            return xs, ys, ys, ys
+
+        x_min, x_max = float(np.min(x)), float(np.max(x))
+        xs = np.linspace(x_min, x_max, n_grid)
+
+        std = float(np.std(x, ddof=1)) if n > 1 else 0.0
+        iqr = float(np.subtract(*np.percentile(x, [75, 25])))
+        sigma = min(std, iqr / 1.34) if iqr > 0 else std
+        if sigma <= 0:
+            sigma = max((x_max - x_min) / 10.0, 1e-6)
+        h = 1.06 * sigma * (n ** (-1 / 5))
+        h = max(h, (x_max - x_min) / 35.0)
+
+        y_mean = np.empty_like(xs)
+        y_lo = np.empty_like(xs)
+        y_hi = np.empty_like(xs)
+
+        for i, xg in enumerate(xs):
+            z = (x - xg) / h
+            w = np.exp(-0.5 * z * z)
+            sw = np.sum(w)
+            if sw <= 1e-12:
+                y_mean[i] = np.nan
+                y_lo[i] = np.nan
+                y_hi[i] = np.nan
+                continue
+
+            mu = np.sum(w * y) / sw
+            var = np.sum(w * (y - mu) ** 2) / sw
+            n_eff = (sw ** 2) / np.sum(w ** 2)
+            se = np.sqrt(max(var, 0.0) / max(n_eff, 1.0))
+
+            y_mean[i] = mu
+            y_lo[i] = mu - 1.96 * se
+            y_hi[i] = mu + 1.96 * se
+
+        valid = np.isfinite(y_mean)
+        return xs[valid], y_mean[valid], y_lo[valid], y_hi[valid]
+
+    def _draw_joint_block(fig_obj,
+                          spec,
+                          x_true,
+                          y_delta,
+                          y_pred_raw,
+                          x_label,
+                          y_label,
+                          base_color,
+                          legend_loc="upper left",
+                          stat_pos=(0.98, 0.04),
+                          stat_ha="right",
+                          stat_va="bottom"):
+        inner = GridSpecFromSubplotSpec(
+            2, 2,
+            subplot_spec=spec,
+            height_ratios=[1, 4],
+            width_ratios=[4, 1],
+            hspace=0.02,
+            wspace=0.02,
+        )
+        ax_top = fig_obj.add_subplot(inner[0, 0])
+        ax_main = fig_obj.add_subplot(inner[1, 0], sharex=ax_top)
+        ax_right = fig_obj.add_subplot(inner[1, 1], sharey=ax_main)
+        ax_empty = fig_obj.add_subplot(inner[0, 1])
+        ax_empty.axis("off")
+
+        for ax in (ax_top, ax_main, ax_right):
+            ax.set_facecolor(bg_color)
+
+        ax_main.scatter(x_true, y_delta, s=18, alpha=0.35, color=base_color,
+                        edgecolors="white", linewidths=0.2)
+
+        xs, m, lo, hi = _kernel_smooth_with_ci(x_true, y_delta)
+        ax_main.plot(xs, m, color=trend_color, linestyle="--", linewidth=1.8)
+        ax_main.fill_between(xs, lo, hi, color=ci_color, alpha=0.35, linewidth=0)
+
+        ax_main.axhline(0.0, color="#404040", linestyle="--", linewidth=1.0, alpha=0.9)
+
+        q33, q67 = np.quantile(y_pred_raw, [1 / 3, 2 / 3])
+        ax_main.axvline(q33, color=boundary_color, linestyle=":", linewidth=1.3)
+        ax_main.axvline(q67, color=boundary_color, linestyle=":", linewidth=1.3)
+
+        xmin, xmax = ax_main.get_xlim()
+        ymin, ymax = ax_main.get_ylim()
+        x_shift = 0.010 * (xmax - xmin)
+        y_pos = ymax - 0.08 * (ymax - ymin)
+        ax_main.text(q33 + x_shift, y_pos, "q33", ha="left", va="bottom", fontsize=9, color=boundary_color)
+        ax_main.text(q67 + x_shift, y_pos, "q67", ha="left", va="bottom", fontsize=9, color=boundary_color)
+
+        ax_main.set_xlabel(x_label)
+        ax_main.set_ylabel(y_label)
+
+        bins_x = max(18, min(32, int(np.sqrt(len(x_true)))))
+        bins_y = max(18, min(32, int(np.sqrt(len(y_delta)))))
+
+        ax_top.hist(x_true, bins=bins_x, color=base_color, edgecolor="#666666", alpha=0.45)
+        ax_top.tick_params(axis="x", labelbottom=False)
+        ax_top.tick_params(axis="y", left=False, labelleft=False)
+        ax_top.spines["left"].set_visible(False)
+        ax_top.spines["top"].set_visible(False)
+        ax_top.spines["right"].set_visible(False)
+
+        ax_right.hist(y_delta, bins=bins_y, orientation="horizontal", color=base_color,
+                      edgecolor="#666666", alpha=0.45)
+        ax_right.tick_params(axis="x", bottom=False, labelbottom=False)
+        ax_right.tick_params(axis="y", labelleft=False)
+        ax_right.spines["top"].set_visible(False)
+        ax_right.spines["right"].set_visible(False)
+        ax_right.spines["bottom"].set_visible(False)
+
+        mean_delta = float(np.mean(y_delta))
+        std_delta = float(np.std(y_delta, ddof=1)) if len(y_delta) > 1 else 0.0
+        ax_main.text(
+            stat_pos[0], stat_pos[1],
+            f"n={len(y_delta)}\nmean={mean_delta:.3f}\nstd={std_delta:.3f}",
+            transform=ax_main.transAxes,
+            ha=stat_ha, va=stat_va, fontsize=10,
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#b5b5b5", alpha=0.95),
+        )
+
+        legend_handles = [
+            Line2D([0], [0], marker='o', color='none', markerfacecolor=base_color, markeredgecolor='white',
+                   markeredgewidth=0.3, markersize=6, alpha=0.8, label='Samples'),
+            Line2D([0], [0], color=trend_color, linestyle='--', linewidth=1.8, label='Smoothed trend'),
+            Patch(facecolor=ci_color, edgecolor='none', alpha=0.35, label='95% interval'),
+            Line2D([0], [0], color=boundary_color, linestyle=':', linewidth=1.3, label='Segment boundaries'),
+        ]
+        ax_main.legend(handles=legend_handles, loc=legend_loc, frameon=False, fontsize=9)
+
+    with plt.rc_context({
+        "font.family": "DejaVu Sans",
+        "axes.facecolor": bg_color,
+        "figure.facecolor": bg_color,
+        "savefig.facecolor": bg_color,
+        "savefig.edgecolor": bg_color,
+        "axes.grid": False,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+    }):
+        fig = plt.figure(figsize=figsize, constrained_layout=False, facecolor=bg_color)
+        outer = GridSpec(2, 1, figure=fig, hspace=0.26)
+
+        _draw_joint_block(
+            fig,
+            outer[0],
+            t_true,
+            t_delta,
+            t_pred_raw,
+            f"T true ({t_unit})",
+            f"Correction Value({t_unit})",
+            t_color,
+            legend_loc="upper left",
+            stat_pos=(0.98, 0.04),
+            stat_ha="right",
+            stat_va="bottom",
+        )
+
+        _draw_joint_block(
+            fig,
+            outer[1],
+            p_true,
+            p_delta,
+            p_pred_raw,
+            f"P true ({p_unit})",
+            f"Correction Value({p_unit})",
+            p_color,
+            legend_loc="lower right",
+            stat_pos=(0.76, 0.06),
+            stat_ha="right",
+            stat_va="bottom",
+        )
+
+        fig.suptitle(title, fontsize=15, y=0.985)
+        fig.subplots_adjust(top=0.955, left=0.08, right=0.95, bottom=0.05)
+        return fig
+
 
 if __name__ == "__main__":
     print("=== 可视化示例 ===")
