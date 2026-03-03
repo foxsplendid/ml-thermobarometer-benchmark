@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-M1 数据模块测试
-
-测试 RawDataModule, BalancedDataModule, AugmentedDataModule
-"""
+"""Unit tests for data preprocessing modules."""
 
 import pytest
 import numpy as np
@@ -16,50 +12,45 @@ from src.data_modules import (
 
 
 class TestRawDataModule:
-    """RawDataModule 测试"""
+    """TestRawDataModule class."""
 
     def test_fit_transform_shape(self, train_val_split):
-        """验证 fit_transform 输出形状正确"""
+        """test_fit_transform_shape function."""
         module = RawDataModule()
         X2, y2, weights, state = module.fit_transform(
             train_val_split['X_train'],
             train_val_split['y_train']
         )
 
-        # 形状不变
         assert X2.shape == train_val_split['X_train'].shape
         assert len(y2) == len(train_val_split['y_train'])
         assert len(weights) == len(y2)
 
     def test_weights_uniform(self, train_val_split):
-        """验证权重为均匀分布"""
+        """test_weights_uniform function."""
         module = RawDataModule()
         _, _, weights, _ = module.fit_transform(
             train_val_split['X_train'],
             train_val_split['y_train']
         )
 
-        # 所有权重相等
         assert np.allclose(weights, 1.0)
 
     def test_transform_uses_train_scaler(self, train_val_split):
-        """验证 transform 使用训练集的 scaler"""
+        """test_transform_uses_train_scaler function."""
         module = RawDataModule()
         X_scaled, _, _, state = module.fit_transform(
             train_val_split['X_train'],
             train_val_split['y_train']
         )
 
-        # 训练集标准化后均值接近0
         assert np.allclose(X_scaled.mean(axis=0), 0, atol=1e-10)
 
-        # 验证集使用训练集参数，均值可能不为0
         X_val_scaled, _ = module.transform(train_val_split['X_val'], state)
-        # 验证集形状正确
         assert X_val_scaled.shape == train_val_split['X_val'].shape
 
     def test_state_contains_scaler(self, train_val_split):
-        """验证 state 包含 scaler"""
+        """test_state_contains_scaler function."""
         module = RawDataModule()
         _, _, _, state = module.fit_transform(
             train_val_split['X_train'],
@@ -71,33 +62,31 @@ class TestRawDataModule:
 
 
 class TestBalancedDataModule:
-    """BalancedDataModule 测试"""
+    """TestBalancedDataModule class."""
 
     def test_fit_transform_shape(self, train_val_split):
-        """验证 fit_transform 输出形状正确"""
+        """test_fit_transform_shape function."""
         module = BalancedDataModule(n_bins=5)
         X2, y2, weights, state = module.fit_transform(
             train_val_split['X_train'],
             train_val_split['y_train']
         )
 
-        # 形状不变
         assert X2.shape == train_val_split['X_train'].shape
         assert len(weights) == len(y2)
 
     def test_weights_sum(self, train_val_split):
-        """验证权重总和约等于样本数"""
+        """test_weights_sum function."""
         module = BalancedDataModule(n_bins=5)
         _, _, weights, _ = module.fit_transform(
             train_val_split['X_train'],
             train_val_split['y_train']
         )
 
-        # 权重总和等于样本数
         assert np.isclose(weights.sum(), len(weights), rtol=0.01)
 
     def test_weights_positive(self, train_val_split):
-        """验证权重非负"""
+        """test_weights_positive function."""
         module = BalancedDataModule(n_bins=5)
         _, _, weights, _ = module.fit_transform(
             train_val_split['X_train'],
@@ -108,10 +97,10 @@ class TestBalancedDataModule:
 
 
 class TestAugmentedDataModule:
-    """AugmentedDataModule 测试"""
+    """TestAugmentedDataModule class."""
 
     def test_augmentation_increases_samples(self, sample_data_large):
-        """增强后样本数应增加"""
+        """test_augmentation_increases_samples function."""
         X, y = sample_data_large
         n_aug = 5
         module = AugmentedDataModule(n_aug=n_aug)
@@ -122,7 +111,7 @@ class TestAugmentedDataModule:
         assert len(y2) == expected_size
 
     def test_original_samples_preserved(self, sample_data_large):
-        """原始样本应被保留在前段"""
+        """test_original_samples_preserved function."""
         X, y = sample_data_large
         module = AugmentedDataModule(n_aug=3)
         X2, y2, _, state = module.fit_transform(X, y)
@@ -133,7 +122,7 @@ class TestAugmentedDataModule:
         assert len(y2) == original_size * 4
 
     def test_transform_no_augmentation(self, sample_data_large):
-        """transform 不进行增强"""
+        """test_transform_no_augmentation function."""
         X, y = sample_data_large
         X_train, X_val = X[:400], X[400:]
         y_train = y[:400]
@@ -144,7 +133,7 @@ class TestAugmentedDataModule:
         assert X_val_scaled.shape == X_val.shape
 
     def test_feature_name_inference(self, sample_data_large):
-        """feature_names 自动推断"""
+        """test_feature_name_inference function."""
         from config import DataConfig
 
         X, y = sample_data_large
@@ -157,25 +146,25 @@ class TestAugmentedDataModule:
 
 
 class TestGetDataModule:
-    """工厂函数测试"""
+    """TestGetDataModule class."""
 
     def test_get_raw(self):
-        """获取 raw 模块"""
+        """test_get_raw function."""
         module = get_data_module('raw')
         assert isinstance(module, RawDataModule)
 
     def test_get_balanced(self):
-        """获取 balanced 模块"""
+        """test_get_balanced function."""
         module = get_data_module('balanced')
         assert isinstance(module, BalancedDataModule)
 
     def test_get_augmented(self):
-        """获取 augmented 模块"""
+        """test_get_augmented function."""
         module = get_data_module('augmented')
         assert isinstance(module, AugmentedDataModule)
 
     def test_case_insensitive(self):
-        """名称大小写不敏感"""
+        """test_case_insensitive function."""
         module1 = get_data_module('RAW')
         module2 = get_data_module('Raw')
         module3 = get_data_module('raw')
@@ -183,6 +172,7 @@ class TestGetDataModule:
         assert type(module1) == type(module2) == type(module3)
 
     def test_invalid_name(self):
-        """无效名称抛出异常"""
+        """test_invalid_name function."""
         with pytest.raises(ValueError):
             get_data_module('invalid_module')
+

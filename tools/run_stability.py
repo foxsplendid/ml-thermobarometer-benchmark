@@ -1,58 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-稳定性测试工具 - 评估模型在不同随机划分下的性能稳定性
-
-功能：
-    评估模型对训练数据随机子采样的敏感性，量化性能波动范围。
-
-    实现语义（非 MC-CV）：
-    1. 对训练集进行分层子采样（保持 P-T 分布一致）
-    2. 在子采样数据上进行 CV 拟合校正器
-    3. 训练最终模型
-    4. 在固定测试集上评估
-
-    每次重复使用不同的随机种子，影响：
-    - 训练集子采样的随机性
-    - 模型内部的随机性（如树的随机分裂）
-    - CV 折划分的随机性
-
-使用方法：
-
-    1. 快速测试（100次重复，约30分钟）：
-       python tools/run_stability.py --n-repeats 100
-
-    2. 完整运行（1000次重复，约5小时）：
-       python tools/run_stability.py --n-repeats 1000
-
-    3. 分段运行（推荐，支持断点续跑）：
-       # 第一段（0-199）
-       python tools/run_stability.py --repeat-start 0 --repeat-end 199
-       # 第二段（200-399）
-       python tools/run_stability.py --repeat-start 200 --repeat-end 399
-       # ...更多段...
-       # 合并
-       python tools/run_stability.py --merge-dir results
-
-    4. 断点续跑（自动从最新检查点继续）：
-       python tools/run_stability.py --n-repeats 1000 --resume
-
-    5. 自定义配置：
-       python tools/run_stability.py --exp-id E07_stability --model-module ert --data-module augmented
-
-输出：
-    results/stability/
-    ├── {exp_id}_T_test_metrics.csv       # T 目标的所有重复结果
-    ├── {exp_id}_P_test_metrics.csv       # P 目标的所有重复结果
-    ├── {exp_id}_*_checkpoint_*.csv       # 检查点文件（每100次）
-    └── stability_summary.csv             # 汇总统计
-
-Notes:
-- 使用固定的 hold-out 测试集（由 prepare_splits 生成）
-- 每次重复使用不同的随机种子（影响模型、子采样、CV划分）
-- 子采样使用分层采样，保持 P-T 分布与整体一致
-- 检查点默认每 20 次保存，支持中断后恢复
-"""
 import argparse
 import glob
 import logging
@@ -72,55 +18,13 @@ if ROOT_DIR not in sys.path:
 
 from config import get_config_dict
 from main import load_data, prepare_splits
+from src.experiment_params import build_data_params, build_model_params
 from src.metrics import summarize_folds
 from src.protocol import ExperimentConfig, ExperimentMatrix
 from src.logger import setup_logging, get_logger
 
-# 从集中配置获取
 BASE_CONFIG = get_config_dict()
 logger = logging.getLogger(__name__)
-
-
-def _build_model_params(base_config: dict, model_module: str, random_seed: int) -> dict:
-    model_defaults = base_config["model_defaults"]
-    name = model_module.lower()
-
-    if name in {"ert", "extratrees"}:
-        params = dict(model_defaults["ert"])
-    elif name in {"rf", "randomforest"}:
-        params = dict(model_defaults["rf"])
-    elif name in {"catboost", "cb"}:
-        params = dict(model_defaults["catboost"])
-    elif name == "stacking":
-        stacking_params = dict(model_defaults.get("stacking", {}))
-        base_params = {
-            "ert": dict(model_defaults["ert"]),
-            "catboost": dict(model_defaults["catboost"]),
-            "rf": dict(model_defaults["rf"]),
-        }
-        for key, override in model_defaults.get("stacking_base_defaults", {}).items():
-            if key in base_params and isinstance(override, dict):
-                base_params[key].update(override)
-        params = {"base_model_params": base_params}
-        if stacking_params:
-            params.update({
-                "inner_cv": stacking_params.get("inner_cv"),
-                "use_meta_scaler": stacking_params.get("use_meta_scaler"),
-            })
-    else:
-        params = {}
-
-    params["random_seed"] = random_seed
-    return params
-
-
-def _build_data_params(base_config: dict, data_module: str, feature_set: str, random_seed: int) -> dict:
-    params = {"random_seed": random_seed}
-    if data_module.lower() == "augmented":
-        params["feature_names"] = base_config["feature_sets"][feature_set]
-        params["n_aug"] = base_config["augmentation"]["n_aug"]
-    return params
-
 
 def _build_config(
     exp_id: str,
@@ -130,10 +34,9 @@ def _build_config(
     feature_set: str,
     random_seed: int,
 ) -> ExperimentConfig:
-    """构建实验配置"""
-    # 统一使用 random_seed（模型内部自行转换为 sklearn 的 random_state）
-    model_params = _build_model_params(BASE_CONFIG, model_module, random_seed)
-    data_params = _build_data_params(BASE_CONFIG, data_module, feature_set, random_seed)
+    """_build_config function."""
+    model_params = build_model_params(BASE_CONFIG, model_module, random_seed)
+    data_params = build_data_params(BASE_CONFIG, data_module, feature_set, random_seed)
 
     return ExperimentConfig(
         exp_id=exp_id,
@@ -257,31 +160,28 @@ Examples:
   python tools/run_stability.py --model-module stacking --corr-module segmented
 """
     )
-    # 实验配置
-    parser.add_argument("--exp-id", default="stability_test", help="实验ID（输出文件名前缀）")
+    parser.add_argument("--exp-id", default="stability_test", help="Experiment ID (output filename prefix)")
     parser.add_argument("--data-module", default="augmented", 
                         choices=["raw", "balanced", "augmented"],
-                        help="数据模块")
+                        help="Data module")
     parser.add_argument("--model-module", default="ert",
                         choices=["ert", "extratrees", "catboost", "rf", "randomforest", "stacking"],
-                        help="模型模块")
+                        help="Model module")
     parser.add_argument("--corr-module", default="none",
                         choices=["none", "residual", "segmented"],
-                        help="校正模块")
+                        help="Correction module")
     parser.add_argument("--feature-set", default="Liquid",
                         choices=["NoLiquid", "Liquid"],
-                        help="特征集")
+                        help="Feature set")
     
-    # 通用参数
     parser.add_argument("--data-path", default=BASE_CONFIG["data_path"])
     parser.add_argument("--output-dir", default=BASE_CONFIG["output_dir"])
     parser.add_argument("--n-splits", type=int, default=BASE_CONFIG["n_splits"])
     parser.add_argument("--random-seed", type=int, default=BASE_CONFIG["random_seed"],
                         help="base seed for repeats (base + repeat_id)")
     
-    # 稳定性测试参数（使用硬编码默认值，因main.py已移除相关配置）
     parser.add_argument("--n-repeats", type=int, default=1000,
-                        help="重复次数（默认1000）")
+                        help="Number of repeats (default: 1000)")
     parser.add_argument("--repeat-start", type=int, default=None,
                         help="repeat start (inclusive), for segmented runs")
     parser.add_argument("--repeat-end", type=int, default=None,
@@ -315,7 +215,6 @@ Examples:
 
     segment_tag = f"rep_{repeat_start:03d}_{repeat_end:03d}" if segmented else None
 
-    # 构建实验配置
     config = _build_config(
         exp_id=args.exp_id,
         data_module=args.data_module,
@@ -325,13 +224,12 @@ Examples:
         random_seed=args.random_seed,
     )
     
-    print(f"实验配置: {config.exp_id}")
-    print(f"  数据模块: {config.data_module_name}")
-    print(f"  模型模块: {config.model_module_name}")
-    print(f"  校正模块: {config.corr_module_name}")
-    print(f"  特征集: {config.feature_set}")
+    print(f"Experiment config: {config.exp_id}")
+    print(f"  Data module: {config.data_module_name}")
+    print(f"  Model module: {config.model_module_name}")
+    print(f"  Correction module: {config.corr_module_name}")
+    print(f"  Feature set: {config.feature_set}")
 
-    # 加载数据（使用完整的BASE_CONFIG，覆盖命令行参数）
     if args.merge_dir:
         _ensure_dir(args.output_dir)
         print("=" * 70)
@@ -390,7 +288,7 @@ Examples:
         )
 
     elapsed = time.time() - start
-    print(f"\n完成，耗时 {elapsed:.1f}s")
+    print(f"\nDone. Elapsed: {elapsed:.1f}s")
     return 0
 
 
@@ -406,6 +304,6 @@ if __name__ == "__main__":
     try:
         exit_code = main()
     except Exception:
-        logger.exception("稳定性测试运行异常")
+        logger.exception("Stability test run failed")
         raise
     sys.exit(exit_code)

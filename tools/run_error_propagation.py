@@ -1,44 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-分析误差传播工具 (Analysis Error Propagation)
-
-设计理念：
-    评估 "EPMA 分析误差经固定模型放大后的输出离散度"（analysis-limited precision），
-    而非模型的总体预测误差。
-
-    核心原则：
-    1. 模型固定：在全部训练数据上拟合一个固定模型，不做 CV、不重新训练
-    2. 样本固定：对固定的测试样本进行多次输入扰动
-    3. 仅扰动输入：对输入组成（氧化物 wt%）添加 EPMA 误差模型噪声
-    4. 评估输出离散度：计算输出分布的标准差、区间宽度等
-
-    EPMA 误差模型说明：
-    - 采用按氧化物列名映射的相对误差（而非按数值阈值动态切换）
-    - 主量元素（SiO2, Al2O3, FeO, MgO, CaO）：3% 相对误差
-    - 低含量元素（TiO2, MnO, Na2O, Cr2O3, K2O）：8% 相对误差
-    - 设计依据：Ágreda-López et al. (2024) ML_PT_Pyworkflow
-    - 详见 src/perturbation.py::DEFAULT_OXIDE_REL_ERR
-
-    扰动策略：
-    - 不做负值截断（clip），保留完整正态分布以体现真实误差传播
-    - 不做闭合约束（closure），与训练数据预处理保持一致
-
-    输出指标含义：
-    - analysis_std: 由分析误差导致的输出标准差（核心指标）
-    - analysis_interval_68/90: 输出分布的 68%/90% 区间宽度
-    - total_rmse/mae: 相对真值的总误差（包含模型误差）
-    - analysis_contribution_ratio: 分析误差对总误差的近似贡献比例
-
-使用方法:
-    python tools/run_error_propagation.py --model-module ert
-    python tools/run_error_propagation.py --data-module augmented --model-module catboost --feature-set Liquid
-
-说明:
-- 使用固定的 hold-out 测试集（由 prepare_splits 生成）
-- 在全部训练数据上拟合一个固定模型（无 CV）
-- 支持 --corr-module；若启用校正器，则在全训练集上拟合（非 OOF）
-"""
 import argparse
 import json
 import logging
@@ -61,6 +21,7 @@ from main import load_data, prepare_splits
 from src.data_modules import get_data_module
 from src.model_modules import get_model_module
 from src.correction_modules import get_correction_module
+from src.experiment_params import build_data_params, build_model_params
 from src.protocol import (
     ExperimentConfig,
     Pipeline,
@@ -72,82 +33,38 @@ from src.logger import setup_logging, get_logger
 
 logger = logging.getLogger(__name__)
 
-# 从集中配置获取
 BASE_CONFIG = get_config_dict()
 
-# 输出子目录
 OUTPUT_SUBDIR = "error_propagation"
 
-
-def _build_model_params(base_config: dict, model_module: str, random_seed: int) -> dict:
-    model_defaults = base_config["model_defaults"]
-    name = model_module.lower()
-
-    if name in {"ert", "extratrees"}:
-        params = dict(model_defaults["ert"])
-    elif name in {"rf", "randomforest"}:
-        params = dict(model_defaults["rf"])
-    elif name in {"catboost", "cb"}:
-        params = dict(model_defaults["catboost"])
-    elif name == "stacking":
-        stacking_params = dict(model_defaults.get("stacking", {}))
-        base_params = {
-            "ert": dict(model_defaults["ert"]),
-            "catboost": dict(model_defaults["catboost"]),
-            "rf": dict(model_defaults["rf"]),
-        }
-        for key, override in model_defaults.get("stacking_base_defaults", {}).items():
-            if key in base_params and isinstance(override, dict):
-                base_params[key].update(override)
-        params = {"base_model_params": base_params}
-        if stacking_params:
-            params.update({
-                "inner_cv": stacking_params.get("inner_cv"),
-                "use_meta_scaler": stacking_params.get("use_meta_scaler"),
-            })
-    else:
-        params = {}
-
-    params["random_seed"] = random_seed
-    return params
-
-
-def _build_data_params(base_config: dict, data_module: str, feature_set: str, random_seed: int) -> dict:
-    params = {"random_seed": random_seed}
-    if data_module.lower() == "augmented":
-        params["feature_names"] = base_config["feature_sets"][feature_set]
-        params["n_aug"] = base_config["augmentation"]["n_aug"]
-    return params
-
-
 def _load_main_experiment_test_rmse(output_dir: str, exp_id: str, target: str) -> Optional[float]:
-    """从主实验 results/metrics_summary.csv 读取独立测试集 RMSE（统一对比口径）"""
+    """_load_main_experiment_test_rmse function."""
     summary_path = os.path.join(output_dir, "metrics_summary.csv")
     if not os.path.exists(summary_path):
-        logger.warning(f"主实验 metrics_summary.csv 不存在: {summary_path}")
+        logger.warning(f"Main-experiment metrics_summary.csv does not exist: {summary_path}")
         return None
 
     try:
         df = pd.read_csv(summary_path)
         if "exp_id" not in df.columns:
-            logger.warning(f"metrics_summary.csv 缺少 exp_id 列: {summary_path}")
+            logger.warning(f"metrics_summary.csv is missing exp_id column: {summary_path}")
             return None
 
         row = df[df["exp_id"] == exp_id]
         if row.empty:
-            logger.warning(f"metrics_summary.csv 中未找到 exp_id={exp_id}")
+            logger.warning(f"exp_id={exp_id} not found in metrics_summary.csv")
             return None
 
         col = f"{target}_test_rmse"
         if col not in row.columns:
-            logger.warning(f"metrics_summary.csv 缺少 {col} 列")
+            logger.warning(f"metrics_summary.csv is missing column {col}")
             return None
 
         test_rmse = float(row.iloc[0][col])
-        logger.info(f"[{target}] 读取主实验 test_RMSE: {test_rmse:.2f} (from {exp_id})")
+        logger.info(f"[{target}] main-experiment test_RMSE: {test_rmse:.2f} (from {exp_id})")
         return test_rmse
     except Exception as e:
-        logger.warning(f"读取主实验 test_RMSE 失败: {e}")
+        logger.warning(f"Failed to read main-experiment test_RMSE: {e}")
         return None
 
 
@@ -159,9 +76,9 @@ def _build_config(
     feature_set: str,
     random_seed: int,
 ) -> ExperimentConfig:
-    """构建实验配置（允许选择校正模块）"""
-    model_params = _build_model_params(BASE_CONFIG, model_module, random_seed)
-    data_params = _build_data_params(BASE_CONFIG, data_module, feature_set, random_seed)
+    """_build_config function."""
+    model_params = build_model_params(BASE_CONFIG, model_module, random_seed)
+    data_params = build_data_params(BASE_CONFIG, data_module, feature_set, random_seed)
 
     return ExperimentConfig(
         exp_id=exp_id,
@@ -236,37 +153,25 @@ def _run_error_propagation(
     mc_seed: int,
     feature_names_raw: Optional[str],
 ) -> None:
-    """
-    运行分析误差传播实验
-
-    核心逻辑：
-    1. 在全量训练数据上拟合一个固定模型（无 CV）
-    2. 计算无扰动基线预测 y_pred_base
-    3. 对测试集样本进行 n_mc 次输入扰动
-    4. 统计输出分布的离散度（std, interval_width 等）
-    5. 分离报告：总误差指标 vs 分析误差传播指标
-    """
+    """_run_error_propagation function."""
     rng = np.random.default_rng(mc_seed)
 
-    # mc_sample_size <= 0 表示使用全部测试集
     if mc_sample_size <= 0:
         sample_size = len(X_test)
         sample_idx = np.arange(len(X_test))
-        logger.info(f"使用全部测试集: {sample_size} 个样本")
+        logger.info(f"Using full test set: {sample_size} samples")
     else:
         sample_size = min(mc_sample_size, len(X_test))
         sample_idx = rng.choice(len(X_test), size=sample_size, replace=False)
-        logger.info(f"随机采样测试集: {sample_size} / {len(X_test)} 个样本")
+        logger.info(f"Randomly sampled test set: {sample_size} / {len(X_test)} samples")
 
     X_mc = X_test[sample_idx]
     y_T_mc = y_T_test[sample_idx]
     y_P_mc = y_P_test[sample_idx]
 
-    # 输出目录：results/error_propagation/
     ep_dir = os.path.join(output_dir, OUTPUT_SUBDIR)
     _ensure_dir(ep_dir)
 
-    # 获取特征列名（用于按列名映射 rel_err）
     from config import DataConfig
     data_config = DataConfig()
     feature_names = _parse_feature_names(feature_names_raw)
@@ -277,16 +182,15 @@ def _run_error_propagation(
             feature_names = data_config.feature_sets['NoLiquid']
         else:
             raise ValueError(
-                f"无法根据特征数推断 feature_names，n_features={X_test.shape[1]}，"
-                f"请通过 --feature-names 提供自定义列名"
+                f"Cannot infer feature_names from n_features={X_test.shape[1]}; "
+                f"please provide custom names via --feature-names"
             )
     if len(feature_names) != X_test.shape[1]:
-        raise ValueError(f"feature_names 长度必须与特征数一致，len={len(feature_names)} n_features={X_test.shape[1]}")
+        raise ValueError(f"feature_names length must match feature dimension, len={len(feature_names)} n_features={X_test.shape[1]}")
 
     from src.perturbation import get_rel_err_vector
     rel_err_vec = get_rel_err_vector(feature_names, strict=True)
 
-    # 保存元数据
     meta = {
         "exp_id": config.exp_id,
         "description": "Analysis error propagation experiment - evaluates EPMA analysis error amplification through fixed model",
@@ -298,9 +202,9 @@ def _run_error_propagation(
             "no_closure": "No sum normalization, consistent with training data preprocessing",
         },
         "metric_notes": {
-            "analysis_std": "仅反映输入扰动引起的预测离散度",
-            "total_error": "total_* 为未扰动基线预测的误差，包含模型误差",
-            "ratio_note": "analysis_contribution_ratio 为近似贡献比例，非严格误差分解",
+            "analysis_std": "Reflects prediction dispersion caused only by input perturbation",
+            "total_error": "total_* is baseline (unperturbed) prediction error and includes model error",
+            "ratio_note": "analysis_contribution_ratio is an approximate contribution ratio, not a strict error decomposition",
         },
         "corr_module": config.corr_module_name,
         "n_mc": n_mc,
@@ -325,7 +229,6 @@ def _run_error_propagation(
     }
     _save_json(os.path.join(ep_dir, f"{config.exp_id}_ep_meta.json"), meta)
 
-    # 为每个目标单独训练与评估，隔离随机性
     def run_target(tag: str, y_true_mc: np.ndarray, y_train: np.ndarray) -> None:
         target_seed = _derive_target_seed(random_seed, tag)
         mc_seed_target = _derive_target_seed(mc_seed, tag)
@@ -413,7 +316,7 @@ def _run_error_propagation(
 
         cv_info = f", main_test_rmse={summary['main_test_rmse']:.2f}" if summary.get("main_test_rmse") else ""
         ratio_info = f", propagated/test={summary['propagated_vs_test_ratio']:.1%}" if summary.get("propagated_vs_test_ratio") else ""
-        logger.info(f"[{tag}] 完成: analysis_std_mean={summary['analysis_std_mean']:.2f}, "
+        logger.info(f"[{tag}] done: analysis_std_mean={summary['analysis_std_mean']:.2f}, "
                     f"analysis_2mad_mean={summary['analysis_2mad_mean']:.2f}{cv_info}{ratio_info}")
 
     run_target("T", y_T_mc, y_T_train)
@@ -429,19 +332,19 @@ Examples:
   # Run error propagation with default settings (ERT, augmented, Liquid)
   python tools/run_error_propagation.py --model-module ert
 
-  # Run with different model and feature set
+  # Run with a different model and feature set
   python tools/run_error_propagation.py --model-module catboost --feature-set NoLiquid
-  
+
   # Use custom exp_id
   python tools/run_error_propagation.py --exp-id my_custom_exp --model-module stacking
 
 Output:
   results/error_propagation/
-  ├── {exp_id}_ep_meta.json           # Experiment metadata
-  ├── {exp_id}_ep_T_summary.csv       # Temperature summary statistics
-  ├── {exp_id}_ep_T_samples.csv       # Per-sample T predictions and uncertainty
-  ├── {exp_id}_ep_P_summary.csv       # Pressure summary statistics
-  └── {exp_id}_ep_P_samples.csv       # Per-sample P predictions and uncertainty
+  - {exp_id}_ep_meta.json       # Experiment metadata
+  - {exp_id}_ep_T_summary.csv   # Temperature summary statistics
+  - {exp_id}_ep_T_samples.csv   # Per-sample T predictions and uncertainty
+  - {exp_id}_ep_P_summary.csv   # Pressure summary statistics
+  - {exp_id}_ep_P_samples.csv   # Per-sample P predictions and uncertainty
 """
     )
     parser.add_argument("--exp-id", default=None,
@@ -474,31 +377,25 @@ Output:
 
     args = parser.parse_args()
 
-    # 自动生成 exp_id（与主实验命名原则完全一致）
-    # 主实验命名规则：
     # E01-E03: raw + ert/catboost/stacking + none
     # E04-E06: balanced + ert/catboost/stacking + none
     # E07-E09: augmented + ert/catboost/stacking + none
     # E10-E12: augmented + ert/catboost/stacking + segmented
     if args.exp_id is None:
-        # 根据 data_module 和 model_module 确定实验编号
         data_module = args.data_module.lower()
         model_module = args.model_module.lower()
 
-        # 模型到偏移量的映射
         model_offset = {'ert': 0, 'extratrees': 0, 'catboost': 1, 'rf': 0, 'randomforest': 0, 'stacking': 2}
         offset = model_offset.get(model_module, 0)
 
-        # 数据模块到基准编号的映射（corr=none / segmented）
         data_base_none = {'raw': 1, 'balanced': 4, 'augmented': 7}
         if args.corr_module.lower() == "segmented" and data_module == "augmented":
             base_num = 10
         else:
-            base_num = data_base_none.get(data_module, 7)  # 默认 augmented
+            base_num = data_base_none.get(data_module, 7)
 
         exp_num = base_num + offset
         suffix = 'noliq' if args.feature_set == 'NoLiquid' else 'liq'
-        # 格式：E07_ert_augmented_none_liq / E10_ert_augmented_segmented_liq
         corr_tag = args.corr_module.lower()
         exp_id = f"E{exp_num:02d}_{model_module}_{data_module}_{corr_tag}_{suffix}"
     else:
@@ -575,6 +472,6 @@ if __name__ == "__main__":
     try:
         exit_code = main()
     except Exception:
-        logger.exception("分析误差传播运行异常")
+        logger.exception("Error-propagation run failed")
         raise
     sys.exit(exit_code)

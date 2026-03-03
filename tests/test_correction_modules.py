@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-M3 校正模块测试
-
-测试 NoCorrection, ResidualRegressionCorrector, SegmentedLinearCorrector
-"""
+"""Unit tests for prediction-correction modules."""
 
 import pytest
 import numpy as np
@@ -17,11 +13,7 @@ from src.correction_modules import (
 
 @pytest.fixture
 def biased_predictions():
-    """
-    生成带系统性偏差的预测数据
-
-    模拟：预测值 = 真实值 * 0.85 + 150 + 噪声
-    """
+    """biased_predictions function."""
     np.random.seed(42)
     n_samples = 100
 
@@ -32,10 +24,10 @@ def biased_predictions():
 
 
 class TestNoCorrection:
-    """NoCorrection 测试"""
+    """TestNoCorrection class."""
 
     def test_fit_returns_none(self, biased_predictions):
-        """fit 返回 None"""
+        """test_fit_returns_none function."""
         y_true, y_pred = biased_predictions
         module = NoCorrection()
 
@@ -44,7 +36,7 @@ class TestNoCorrection:
         assert corr_model is None
 
     def test_apply_returns_copy(self, biased_predictions):
-        """apply 返回输入的副本"""
+        """test_apply_returns_copy function."""
         y_true, y_pred = biased_predictions
         module = NoCorrection()
 
@@ -52,12 +44,11 @@ class TestNoCorrection:
         y_corr = module.apply(corr_model, y_pred)
 
         assert np.allclose(y_corr, y_pred)
-        # 确保是副本而非引用
         y_corr[0] = -999
         assert y_pred[0] != -999
 
     def test_get_correction_params(self, biased_predictions):
-        """获取校正参数"""
+        """test_get_correction_params function."""
         y_true, y_pred = biased_predictions
         module = NoCorrection()
 
@@ -68,10 +59,10 @@ class TestNoCorrection:
 
 
 class TestResidualRegressionCorrector:
-    """ResidualRegressionCorrector 测试"""
+    """TestResidualRegressionCorrector class."""
 
     def test_reduces_rmse(self, biased_predictions):
-        """校正后 RMSE 应降低"""
+        """test_reduces_rmse function."""
         y_true, y_pred = biased_predictions
         module = ResidualRegressionCorrector()
 
@@ -84,23 +75,21 @@ class TestResidualRegressionCorrector:
         assert rmse_after < rmse_before
 
     def test_slope_adjustment(self, biased_predictions):
-        """校正后斜率应更接近 1"""
+        """test_slope_adjustment function."""
         y_true, y_pred = biased_predictions
         module = ResidualRegressionCorrector()
 
         corr_model = module.fit(y_true, y_pred)
         y_corr = module.apply(corr_model, y_pred)
 
-        # 校正前斜率
         from scipy.stats import linregress
         slope_before = linregress(y_pred, y_true).slope
         slope_after = linregress(y_corr, y_true).slope
 
-        # 校正后斜率更接近 1
         assert abs(slope_after - 1.0) < abs(slope_before - 1.0)
 
     def test_get_correction_params(self, biased_predictions):
-        """获取校正参数"""
+        """test_get_correction_params function."""
         y_true, y_pred = biased_predictions
         module = ResidualRegressionCorrector()
 
@@ -112,10 +101,10 @@ class TestResidualRegressionCorrector:
 
 
 class TestSegmentedLinearCorrector:
-    """SegmentedLinearCorrector 测试"""
+    """TestSegmentedLinearCorrector class."""
 
     def test_fit_creates_segments(self, biased_predictions):
-        """fit 创建分段模型"""
+        """test_fit_creates_segments function."""
         y_true, y_pred = biased_predictions
         module = SegmentedLinearCorrector(n_segments=3)
 
@@ -126,7 +115,7 @@ class TestSegmentedLinearCorrector:
         assert len(corr_model['boundaries']) == 4  # 3 segments = 4 boundaries
 
     def test_apply_within_bounds(self, biased_predictions):
-        """apply 在训练范围内正常工作"""
+        """test_apply_within_bounds function."""
         y_true, y_pred = biased_predictions
         module = SegmentedLinearCorrector(n_segments=3)
 
@@ -137,40 +126,39 @@ class TestSegmentedLinearCorrector:
         assert not np.any(np.isnan(y_corr))
 
     def test_clip_to_train_range(self, biased_predictions):
-        """clip_to_train_range 选项"""
+        """test_clip_to_train_range function."""
         y_true, y_pred = biased_predictions
         module = SegmentedLinearCorrector(clip_to_train_range=True)
 
         corr_model = module.fit(y_true, y_pred)
 
-        # 测试超出训练范围的值
-        y_extreme = np.array([500, 2000])  # 远超训练范围
+        y_extreme = np.array([500, 2000])
         y_corr = module.apply(corr_model, y_extreme)
 
-        # 应该被裁剪到训练范围
         assert y_corr[0] >= corr_model['y_min']
         assert y_corr[1] <= corr_model['y_max']
 
 
 class TestGetCorrectionModule:
-    """工厂函数测试"""
+    """TestGetCorrectionModule class."""
 
     def test_get_none(self):
-        """获取 none 模块"""
+        """test_get_none function."""
         module = get_correction_module('none')
         assert isinstance(module, NoCorrection)
 
     def test_get_residual(self):
-        """获取 residual 模块"""
+        """test_get_residual function."""
         module = get_correction_module('residual')
         assert isinstance(module, ResidualRegressionCorrector)
 
     def test_get_segmented(self):
-        """获取 segmented 模块"""
+        """test_get_segmented function."""
         module = get_correction_module('segmented')
         assert isinstance(module, SegmentedLinearCorrector)
 
     def test_invalid_name(self):
-        """无效名称抛出异常"""
+        """test_invalid_name function."""
         with pytest.raises(ValueError):
             get_correction_module('invalid_correction')
+

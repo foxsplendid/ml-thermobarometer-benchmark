@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-M2 模型模块测试
-
-测试 ExtraTreesModel, CatBoostModel, StrictOOFStacking
-"""
+"""Unit tests for model modules and stacking components."""
 
 import pytest
 import numpy as np
@@ -18,10 +14,10 @@ from src.model_modules import (
 
 
 class TestExtraTreesModel:
-    """ExtraTreesModel 测试"""
+    """TestExtraTreesModel class."""
 
     def test_fit_and_predict(self, train_val_split):
-        """基本训练和预测"""
+        """test_fit_and_predict function."""
         module = ExtraTreesModel(n_estimators=10, max_depth=5, random_seed=42)
 
         model = module.fit(
@@ -35,7 +31,7 @@ class TestExtraTreesModel:
         assert not np.any(np.isnan(y_pred))
 
     def test_with_sample_weights(self, train_val_split):
-        """带样本权重训练"""
+        """test_with_sample_weights function."""
         module = ExtraTreesModel(n_estimators=10, random_seed=42)
         weights = np.ones(len(train_val_split['y_train']))
 
@@ -49,7 +45,7 @@ class TestExtraTreesModel:
         assert len(y_pred) == len(train_val_split['X_val'])
 
     def test_feature_importance(self, train_val_split):
-        """特征重要性获取"""
+        """test_feature_importance function."""
         module = ExtraTreesModel(n_estimators=10, random_seed=42)
 
         model = module.fit(
@@ -60,14 +56,14 @@ class TestExtraTreesModel:
         importance = module.get_feature_importance(model)
 
         assert len(importance) == train_val_split['X_train'].shape[1]
-        assert np.isclose(importance.sum(), 1.0, rtol=0.01)  # 重要性和为1
+        assert np.isclose(importance.sum(), 1.0, rtol=0.01)
 
 
 class TestCatBoostModel:
-    """CatBoostModel 测试"""
+    """TestCatBoostModel class."""
 
     def test_fit_and_predict(self, train_val_split):
-        """基本训练和预测"""
+        """test_fit_and_predict function."""
         module = CatBoostModel(iterations=10, depth=3, random_seed=42, silent=True)
 
         model = module.fit(
@@ -81,7 +77,7 @@ class TestCatBoostModel:
         assert not np.any(np.isnan(y_pred))
 
     def test_training_time_recorded(self, train_val_split):
-        """训练时间记录"""
+        """test_training_time_recorded function."""
         module = CatBoostModel(iterations=10, random_seed=42, silent=True)
 
         module.fit(
@@ -93,11 +89,10 @@ class TestCatBoostModel:
 
 
 class TestStrictOOFStacking:
-    """StrictOOFStacking 测试"""
+    """TestStrictOOFStacking class."""
 
     def test_fit_and_predict(self, train_val_split):
-        """基本训练和预测"""
-        # 使用简化的基模型加速测试
+        """test_fit_and_predict function."""
         base_models = [
             ExtraTreesModel(n_estimators=5, max_depth=3, random_seed=42),
             RandomForestModel(n_estimators=5, max_depth=3, random_seed=42),
@@ -120,7 +115,7 @@ class TestStrictOOFStacking:
         assert not np.any(np.isnan(y_pred))
 
     def test_oof_predictions(self, train_val_split):
-        """OOF 预测生成"""
+        """test_oof_predictions function."""
         base_models = [
             ExtraTreesModel(n_estimators=5, max_depth=3, random_seed=42),
         ]
@@ -136,7 +131,6 @@ class TestStrictOOFStacking:
             train_val_split['y_train']
         )
 
-        # 获取 OOF 预测
         y_oof = module.get_oof_predictions(
             model,
             train_val_split['X_train'],
@@ -146,7 +140,7 @@ class TestStrictOOFStacking:
         assert len(y_oof) == len(train_val_split['y_train'])
 
     def test_base_correlations(self, train_val_split):
-        """基模型相关性矩阵"""
+        """test_base_correlations function."""
         base_models = [
             ExtraTreesModel(n_estimators=5, random_seed=42),
             RandomForestModel(n_estimators=5, random_seed=42),
@@ -170,10 +164,10 @@ class TestStrictOOFStacking:
 
 
 class TestRidgeModel:
-    """RidgeModel（元模型）测试"""
+    """TestRidgeModel class."""
 
     def test_fit_and_predict(self, train_val_split):
-        """基本训练和预测"""
+        """test_fit_and_predict function."""
         module = RidgeModel(alpha=1.0)
 
         model = module.fit(
@@ -186,7 +180,7 @@ class TestRidgeModel:
         assert len(y_pred) == len(train_val_split['X_val'])
 
     def test_get_weights(self, train_val_split):
-        """获取回归系数"""
+        """test_get_weights function."""
         module = RidgeModel(alpha=1.0)
 
         model = module.fit(
@@ -200,25 +194,25 @@ class TestRidgeModel:
 
 
 class TestGetModelModule:
-    """工厂函数测试"""
+    """TestGetModelModule class."""
 
     def test_get_ert(self):
-        """获取 ert 模块"""
+        """test_get_ert function."""
         module = get_model_module('ert')
         assert isinstance(module, ExtraTreesModel)
 
     def test_get_catboost(self):
-        """获取 catboost 模块"""
+        """test_get_catboost function."""
         module = get_model_module('catboost')
         assert isinstance(module, CatBoostModel)
 
     def test_get_stacking(self):
-        """获取 stacking 模块"""
+        """test_get_stacking function."""
         module = get_model_module('stacking')
         assert isinstance(module, StrictOOFStacking)
 
     def test_aliases(self):
-        """别名支持"""
+        """test_aliases function."""
         m1 = get_model_module('ert')
         m2 = get_model_module('extratrees')
         assert type(m1) == type(m2)
@@ -228,6 +222,7 @@ class TestGetModelModule:
         assert type(m3) == type(m4)
 
     def test_invalid_name(self):
-        """无效名称抛出异常"""
+        """test_invalid_name function."""
         with pytest.raises(ValueError):
             get_model_module('invalid_model')
+
