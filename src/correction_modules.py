@@ -1,16 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-M3 校正模块 - NoCorrection, ResidualRegressionCorrector, SegmentedLinearCorrector
-
-【校正器拟合策略说明】
-在当前架构中，偏差校正器在协议层（StratifiedCVProtocol）使用全局 OOF 预测进行拟合，
-而非在 Pipeline 内部或逐折拟合。这种全局 OOF 拟合方式可以：
-1. 避免校正器过拟合（使用 OOF 预测而非 in-sample 预测）
-2. 保持校正器的一致性（所有验证折使用同一个校正模型）
-3. 简化代码逻辑（校正器拟合与模型训练解耦）
-
-详见 protocol.py 中 StratifiedCVProtocol.run() 的实现。
-"""
+"""Prediction-bias correction modules used after model inference."""
 
 import numpy as np
 from typing import Any, Dict, Optional
@@ -18,63 +7,37 @@ from typing import Any, Dict, Optional
 from .interfaces import CorrectionModule
 
 # ============================================================
-# 无校正模块
 # ============================================================
 
 class NoCorrection(CorrectionModule):
-    """无校正 - 直接返回原始预测"""
+    """NoCorrection class."""
 
     def fit(self, 
             y_true_train: np.ndarray, 
             y_pred_train: np.ndarray) -> Any:
-        """不做任何操作"""
+        """fit function."""
         return None
     
     def apply(self, corr_model: Any, y_pred: np.ndarray) -> np.ndarray:
-        """直接返回原始预测"""
+        """apply function."""
         return y_pred.copy()
     
     def get_correction_params(self, corr_model: Any) -> Dict[str, float]:
-        """无参数"""
+        """get_correction_params function."""
         return {'method': 'none'}
 
 # ============================================================
-# 残差回归校正模块
 # ============================================================
 
 class ResidualRegressionCorrector(CorrectionModule):
-    """
-    残差回归校正器
-    
-    策略（两步法）：
-    1. 拟合残差模型：residual = g(y_pred)
-       - residual = y_true - y_pred
-       - 用 Ridge/GBDT 学习 y_pred 到 residual 的映射
-    
-    2. 应用校正：y_corr = y_pred + g(y_pred)
-    
-    这种方法可以校正预测的系统性偏差，尤其是在极值区域
-    
-    注意：必须使用 OOF 预测进行拟合，否则会过拟合！
-    """
+    """ResidualRegressionCorrector class."""
     
     def __init__(self, 
                  method: str = 'ridge',
                  alpha: float = 1.0,
                  use_polynomial: bool = False,
                  poly_degree: int = 2):
-        """
-        Parameters
-        ----------
-        method : str
-            残差模型类型: 'ridge' | 'linear'
-        alpha : float
-            Ridge 正则化参数
-        use_polynomial : bool
-            是否使用多项式特征
-        poly_degree : int
-            多项式次数
-        """
+        """__init__ function."""
         self.method = method
         self.alpha = alpha
         self.use_polynomial = use_polynomial
@@ -83,29 +46,14 @@ class ResidualRegressionCorrector(CorrectionModule):
     def fit(self, 
             y_true_train: np.ndarray, 
             y_pred_train: np.ndarray) -> Dict[str, Any]:
-        """
-        拟合残差回归模型
-        
-        Returns
-        -------
-        corr_model : dict
-            {
-                'residual_model': 残差回归模型,
-                'poly_features': 多项式特征转换器（如果使用）,
-                'slope': 诊断用斜率,
-                'intercept': 诊断用截距
-            }
-        """
+        """fit function."""
         from sklearn.linear_model import Ridge, LinearRegression
         from sklearn.preprocessing import PolynomialFeatures
         
-        # 计算残差：正值表示模型低估
         residuals = y_true_train - y_pred_train
         
-        # 准备特征
         X_pred = y_pred_train.reshape(-1, 1)
         
-        # 多项式特征（可选）
         poly_features = None
         if self.use_polynomial:
             poly_features = PolynomialFeatures(degree=self.poly_degree, include_bias=False)
@@ -113,7 +61,6 @@ class ResidualRegressionCorrector(CorrectionModule):
         else:
             X_features = X_pred
         
-        # 拟合残差模型
         if self.method == 'ridge':
             residual_model = Ridge(alpha=self.alpha)
         else:
@@ -121,7 +68,6 @@ class ResidualRegressionCorrector(CorrectionModule):
         
         residual_model.fit(X_features, residuals)
         
-        # 计算诊断指标（原始预测 vs 真值的回归）
         from scipy.stats import linregress
         reg_result = linregress(y_pred_train, y_true_train)
         
@@ -134,23 +80,20 @@ class ResidualRegressionCorrector(CorrectionModule):
         }
     
     def apply(self, corr_model: Dict[str, Any], y_pred: np.ndarray) -> np.ndarray:
-        """应用校正"""
+        """apply function."""
         X_pred = y_pred.reshape(-1, 1)
         
-        # 多项式特征
         if corr_model['poly_features'] is not None:
             X_features = corr_model['poly_features'].transform(X_pred)
         else:
             X_features = X_pred
         
-        # 预测残差
         predicted_residual = corr_model['residual_model'].predict(X_features)
         
-        # 校正：y_corr = y_pred + g(y_pred)
         return y_pred + predicted_residual
     
     def get_correction_params(self, corr_model: Dict[str, Any]) -> Dict[str, float]:
-        """返回校正参数"""
+        """get_correction_params function."""
         if corr_model is None:
             return {}
         
@@ -160,7 +103,6 @@ class ResidualRegressionCorrector(CorrectionModule):
             'intercept_before': corr_model.get('intercept', np.nan),
         }
         
-        # 线性模型系数
         model = corr_model.get('residual_model')
         if model is not None and hasattr(model, 'coef_'):
             result['residual_coef'] = float(model.coef_[0]) if len(model.coef_) == 1 else 0.0
@@ -169,34 +111,16 @@ class ResidualRegressionCorrector(CorrectionModule):
         return result
 
 # ============================================================
-# 端部分段线性校正（可选扩展）
 # ============================================================
 
 class SegmentedLinearCorrector(CorrectionModule):
-    """
-    分段线性校正器
-
-    策略：
-    1. 根据预测值分位数将数据划分为多个区段
-    2. 每个区段独立拟合线性回归（y_true ~ y_pred）
-    3. 应用时根据预测值所在区段选择对应模型
-    4. 可选：将校正结果裁剪到训练集目标值范围内
-    """
+    """SegmentedLinearCorrector class."""
 
     def __init__(self,
                  n_segments: int = 3,
                  quantiles: Optional[list] = None,
                  clip_to_train_range: bool = True):
-        """
-        Parameters
-        ----------
-        n_segments : int
-            分段数量
-        quantiles : list, optional
-            分段分位数边界，默认 [1/3, 2/3]（三段）
-        clip_to_train_range : bool
-            是否将校正结果裁剪到训练集目标值范围
-        """
+        """__init__ function."""
         self.n_segments = n_segments
         self.quantiles = quantiles or [1/3, 2/3]
         self.clip_to_train_range = clip_to_train_range
@@ -282,25 +206,10 @@ class SegmentedLinearCorrector(CorrectionModule):
         return params
 
 # ============================================================
-# 便捷工厂函数
 # ============================================================
 
 def get_correction_module(name: str, **kwargs) -> CorrectionModule:
-    """
-    校正模块工厂函数
-    
-    Parameters
-    ----------
-    name : str
-        模块名称: 'none' | 'residual' | 'segmented'
-    **kwargs
-        模块参数
-        
-    Returns
-    -------
-    CorrectionModule
-        校正模块实例
-    """
+    """get_correction_module function."""
     modules = {
         'none': NoCorrection,
         'residual': ResidualRegressionCorrector,
@@ -309,7 +218,7 @@ def get_correction_module(name: str, **kwargs) -> CorrectionModule:
     
     name_lower = name.lower().strip()
     if name_lower not in modules:
-        raise ValueError(f"未知校正模块: {name}，支持 {list(modules.keys())}")
+        raise ValueError(f"Unknown correction module: {name}, supported: {list(modules.keys())}")
     
     return modules[name_lower](**kwargs)
 

@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-指标计算测试
-
-测试 metrics.py 中的各种指标函数
-"""
+"""Unit tests for evaluation metric utilities."""
 
 import pytest
 import numpy as np
@@ -17,72 +13,72 @@ from src.metrics import (
 
 
 class TestBasicMetrics:
-    """基础指标函数测试"""
+    """TestBasicMetrics class."""
 
     def test_rmse_perfect(self):
-        """完美预测 RMSE 为 0"""
+        """test_rmse_perfect function."""
         y_true = np.array([1, 2, 3, 4, 5])
         y_pred = np.array([1, 2, 3, 4, 5])
 
         assert rmse(y_true, y_pred) == 0.0
 
     def test_rmse_positive(self):
-        """RMSE 应为正数"""
+        """test_rmse_positive function."""
         y_true = np.array([1, 2, 3])
         y_pred = np.array([1.1, 2.2, 3.3])
 
         assert rmse(y_true, y_pred) > 0
 
     def test_mae_perfect(self):
-        """完美预测 MAE 为 0"""
+        """test_mae_perfect function."""
         y_true = np.array([1, 2, 3])
         y_pred = np.array([1, 2, 3])
 
         assert mae(y_true, y_pred) == 0.0
 
     def test_mae_symmetric(self):
-        """MAE 对称性"""
+        """test_mae_symmetric function."""
         y_true = np.array([1, 2, 3])
-        y_pred = np.array([2, 3, 4])  # 全部高估 1
+        y_pred = np.array([2, 3, 4])
 
         assert mae(y_true, y_pred) == 1.0
 
     def test_r2_perfect(self):
-        """完美预测 R² 为 1"""
+        """test_r2_perfect function."""
         y_true = np.array([1, 2, 3, 4, 5])
         y_pred = np.array([1, 2, 3, 4, 5])
 
         assert r2(y_true, y_pred) == 1.0
 
     def test_r2_bounds(self):
-        """R² 通常在 [0, 1] 范围（好的预测）"""
+        """test_r2_bounds function."""
         np.random.seed(42)
         y_true = np.random.randn(100) * 100 + 1000
-        y_pred = y_true + np.random.randn(100) * 10  # 小噪声
+        y_pred = y_true + np.random.randn(100) * 10
 
         r2_val = r2(y_true, y_pred)
         assert 0 <= r2_val <= 1
 
     def test_bias_positive_means_underestimate(self):
-        """正偏差表示低估"""
+        """test_bias_positive_means_underestimate function."""
         y_true = np.array([2, 3, 4])
-        y_pred = np.array([1, 2, 3])  # 低估 1
+        y_pred = np.array([1, 2, 3])
 
         assert bias(y_true, y_pred) == 1.0
 
     def test_bias_negative_means_overestimate(self):
-        """负偏差表示高估"""
+        """test_bias_negative_means_overestimate function."""
         y_true = np.array([1, 2, 3])
-        y_pred = np.array([2, 3, 4])  # 高估 1
+        y_pred = np.array([2, 3, 4])
 
         assert bias(y_true, y_pred) == -1.0
 
 
 class TestSlopeIntercept:
-    """compute_slope_intercept 测试"""
+    """TestSlopeIntercept class."""
 
     def test_perfect_prediction(self):
-        """完美预测斜率为1，截距为0"""
+        """test_perfect_prediction function."""
         y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         y_pred = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
 
@@ -92,22 +88,21 @@ class TestSlopeIntercept:
         assert np.isclose(intercept, 0.0, atol=1e-10)
 
     def test_linear_bias(self):
-        """线性偏差检测"""
+        """test_linear_bias function."""
         y_true = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
-        y_pred = np.array([5.0, 15.0, 25.0, 35.0, 45.0])  # 全部低估 5
+        y_pred = np.array([5.0, 15.0, 25.0, 35.0, 45.0])
 
         slope, intercept = compute_slope_intercept(y_true, y_pred)
 
-        # 斜率仍为 1，截距为 5
         assert np.isclose(slope, 1.0, atol=1e-10)
         assert np.isclose(intercept, 5.0, atol=1e-10)
 
 
 class TestBiasStats:
-    """compute_bias_stats 测试"""
+    """TestBiasStats class."""
 
     def test_basic_stats(self):
-        """基本偏差统计"""
+        """test_basic_stats function."""
         y_true = np.array([1.0, 2.0, 3.0])
         y_pred = np.array([1.1, 1.9, 3.2])
 
@@ -117,9 +112,9 @@ class TestBiasStats:
         assert 'resid_std' in stats
 
     def test_zero_bias(self):
-        """无偏情况"""
+        """test_zero_bias function."""
         y_true = np.array([1.0, 2.0, 3.0])
-        y_pred = np.array([0.9, 2.1, 3.0])  # 均值偏差为 0
+        y_pred = np.array([0.9, 2.1, 3.0])
 
         stats = compute_bias_stats(y_true, y_pred)
 
@@ -127,10 +122,10 @@ class TestBiasStats:
 
 
 class TestComputeMetrics:
-    """compute_metrics 测试"""
+    """TestComputeMetrics class."""
 
     def test_returns_all_metrics(self):
-        """返回所有指标"""
+        """test_returns_all_metrics function."""
         y_true = np.random.randn(100)
         y_pred = y_true + np.random.randn(100) * 0.1
 
@@ -141,7 +136,7 @@ class TestComputeMetrics:
             assert key in metrics
 
     def test_with_prefix(self):
-        """带前缀"""
+        """test_with_prefix function."""
         y_true = np.random.randn(100)
         y_pred = y_true + np.random.randn(100) * 0.1
 
@@ -152,10 +147,10 @@ class TestComputeMetrics:
 
 
 class TestSummarizeFolds:
-    """summarize_folds 测试"""
+    """TestSummarizeFolds class."""
 
     def test_basic_summary(self):
-        """基本汇总"""
+        """test_basic_summary function."""
         fold_metrics = [
             {'rmse': 30.0, 'r2': 0.93},
             {'rmse': 31.0, 'r2': 0.92},
@@ -170,7 +165,7 @@ class TestSummarizeFolds:
         assert 'r2_std' in summary
 
     def test_mean_calculation(self):
-        """均值计算正确"""
+        """test_mean_calculation function."""
         fold_metrics = [
             {'rmse': 30.0},
             {'rmse': 32.0},
@@ -182,7 +177,7 @@ class TestSummarizeFolds:
         assert np.isclose(summary['rmse_mean'], 31.0)
 
     def test_with_ci(self):
-        """带置信区间"""
+        """test_with_ci function."""
         fold_metrics = [
             {'rmse': 30.0 + i * 0.5} for i in range(10)
         ]
@@ -195,7 +190,7 @@ class TestSummarizeFolds:
         assert summary['rmse_ci_upper'] > summary['rmse_mean']
 
     def test_excludes_non_numeric(self):
-        """排除非数值列"""
+        """test_excludes_non_numeric function."""
         fold_metrics = [
             {'fold_id': 0, 'rmse': 30.0},
             {'fold_id': 1, 'rmse': 31.0},
@@ -205,3 +200,4 @@ class TestSummarizeFolds:
 
         assert 'fold_id_mean' not in summary
         assert 'rmse_mean' in summary
+

@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-协议执行器 - Pipeline, StratifiedCVProtocol, ExperimentMatrix
-"""
+"""Cross-validation protocols and experiment orchestration utilities."""
 
 import os
 import time
@@ -17,40 +15,20 @@ from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from .interfaces import DataModule, ModelModule, CorrectionModule, UncertaintyModule, DataModuleState
 from .metrics import summarize_folds, compute_all_metrics
 
-# 获取日志器
 logger = logging.getLogger(__name__)
 
 P_SEED_OFFSET = 1000
 
 def _derive_target_seed(base_seed: int, target_name: str) -> int:
-    """为 P 目标增加偏移量，降低温压随机相关性。"""
+    """_derive_target_seed function."""
     return base_seed + (P_SEED_OFFSET if str(target_name).upper() == "P" else 0)
 
 
 # ============================================================
-# 辅助函数
 # ============================================================
 
 def _apply_seed(params: Dict[str, Any], keys: List[str], seed: int, force: bool = False) -> Dict[str, Any]:
-    """
-    为参数字典注入随机种子（模块级函数，避免重复定义）
-
-    Parameters
-    ----------
-    params : Dict[str, Any]
-        原始参数字典
-    keys : List[str]
-        要注入的键名列表
-    seed : int
-        随机种子值
-    force : bool
-        若为 True，则强制覆盖已有的种子值（用于稳定性测试等需要变化种子的场景）
-
-    Returns
-    -------
-    Dict[str, Any]
-        更新后的参数字典（不修改原字典）
-    """
+    """_apply_seed function."""
     updated = dict(params)
     for key in keys:
         if force or key not in updated:
@@ -59,18 +37,7 @@ def _apply_seed(params: Dict[str, Any], keys: List[str], seed: int, force: bool 
 
 
 def _call_pipeline_factory(factory: Callable, seed: int, fold_idx: int = 0) -> 'Pipeline':
-    """
-    安全调用pipeline factory
-
-    Parameters
-    ----------
-    factory : Callable
-        Pipeline工厂函数
-    seed : int
-        基础随机种子
-    fold_idx : int
-        折索引，用于派生不同折的数据增强种子
-    """
+    """_call_pipeline_factory function."""
     effective_seed = seed + fold_idx
     try:
         return factory(effective_seed)
@@ -78,18 +45,10 @@ def _call_pipeline_factory(factory: Callable, seed: int, fold_idx: int = 0) -> '
         return factory()
 
 # ============================================================
-# Pipeline 类
 # ============================================================
 
 class Pipeline:
-    """
-    完整预测管道（封装 DataModule + ModelModule + CorrectionModule）
-    
-    职责：
-    1. 统一管理数据处理、模型训练、偏差校正的流程
-    2. 提供 predict() 和 predict_raw() 接口
-    3. 存储训练状态（用于 MC 不确定性估计）
-    """
+    """Pipeline class."""
     
     def __init__(self,
                  data_module: DataModule,
@@ -99,7 +58,6 @@ class Pipeline:
         self.model_module = model_module
         self.corr_module = corr_module
         
-        # 训练后的状态
         self._state: Optional[DataModuleState] = None
         self._model: Optional[Any] = None
         self._corr_model: Optional[Any] = None
@@ -109,17 +67,7 @@ class Pipeline:
             X_train: np.ndarray,
             y_train: np.ndarray,
             stratify_labels: Optional[np.ndarray] = None) -> 'Pipeline':
-        """
-        训练完整管道
-        
-        流程：
-        1. 数据处理（标准化、增强等）
-        2. 模型训练
-
-        注意：校正器拟合在协议层（StratifiedCVProtocol）全局完成，
-        不在Pipeline内部拟合，避免重复拟合和逻辑混淆。
-        """
-        # 1. 数据处理
+        """fit function."""
         X2, y2, weights, self._state = self.data_module.fit_transform(
             X_train, y_train
         )
@@ -133,7 +81,6 @@ class Pipeline:
         else:
             stratify2 = None
         
-        # 2. 模型训练
         self._model = self.model_module.fit(X2, y2, weights, stratify_labels=stratify2)
         
         self._is_fitted = True
@@ -142,18 +89,9 @@ class Pipeline:
     def predict(self,
                 X: np.ndarray,
                 apply_correction: bool = True) -> np.ndarray:
-        """
-        预测（输入为已标准化的特征）
-        
-        Parameters
-        ----------
-        X : np.ndarray
-            已标准化的特征
-        apply_correction : bool
-            是否应用偏差校正
-        """
+        """predict function."""
         if not self._is_fitted:
-            raise RuntimeError("Pipeline 未训练，请先调用 fit()")
+            raise RuntimeError("Pipeline is not fitted. Call fit() first.")
         
         y_pred = self.model_module.predict(self._model, X)
         
@@ -165,77 +103,40 @@ class Pipeline:
     def predict_raw(self,
                     X_raw: np.ndarray,
                     apply_correction: bool = True) -> np.ndarray:
-        """
-        预测（输入为原始特征，内部处理标准化）
-        
-        用于 MC 不确定性估计
-        """
+        """predict_raw function."""
         if not self._is_fitted:
-            raise RuntimeError("Pipeline 未训练，请先调用 fit()")
+            raise RuntimeError("Pipeline is not fitted. Call fit() first.")
         
-        # 应用数据变换（使用训练时的状态）
         X_scaled, _ = self.data_module.transform(X_raw, self._state)
         
         return self.predict(X_scaled, apply_correction)
     
     def get_model(self) -> Any:
-        """返回训练好的模型"""
+        """get_model function."""
         return self._model
     
     def get_correction_params(self) -> Dict[str, float]:
-        """返回校正参数"""
+        """get_correction_params function."""
         return self.corr_module.get_correction_params(self._corr_model)
     
     def get_name(self) -> str:
-        """返回管道名称"""
+        """get_name function."""
         return f"{self.data_module.get_name()}_{self.model_module.get_name()}_{self.corr_module.get_name()}"
     
     def set_correction(self, corr_module: CorrectionModule, corr_model: Any) -> None:
-        """
-        设置校正模块和校正模型（用于全局校正器场景）
-        
-        Parameters
-        ----------
-        corr_module : CorrectionModule
-            校正模块实例
-        corr_model : Any
-            已拟合的校正模型
-        """
+        """set_correction function."""
         self.corr_module = corr_module
         self._corr_model = corr_model
 
 # ============================================================
-# 指标计算函数
 # ============================================================
 
 
-# 分层 CV 辅助函数
 
 def _merge_sparse_bins(labels: np.ndarray,
                        min_samples_per_bin: int,
                        verbose: bool = False) -> np.ndarray:
-    """
-    合并稀疏 bins，确保每个 bin 有足够样本数
-
-    合并策略：将稀疏 bin 合并到最近的非稀疏 bin（基于整数标签距离）
-
-    注意：整数标签距离近似 P-T 空间邻近性，因为 bin 标签由 P-T 网格生成。
-    对于极端稀疏的数据分布，合并可能跨越较大的 P-T 空间，但实际影响有限。
-
-    Parameters
-    ----------
-    labels : np.ndarray
-        原始 bin 标签
-    min_samples_per_bin : int
-        每个 bin 的最小样本数
-    verbose : bool
-        是否输出诊断信息
-
-    Returns
-    -------
-    np.ndarray
-        合并后的 bin 标签
-    """
+    """_merge_sparse_bins function."""
     unique_bins, bin_counts = np.unique(labels, return_counts=True)
     merged = labels.copy()
 
@@ -253,7 +154,7 @@ def _merge_sparse_bins(labels: np.ndarray,
                           f"collapsing to single bin")
         return np.zeros_like(labels)
 
-    merge_map = {}  # 记录合并映射用于诊断
+    merge_map = {}
     for sparse_bin in sparse_bins:
         distances = np.abs(non_sparse_bins - sparse_bin)
         nearest_bin = non_sparse_bins[np.argmin(distances)]
@@ -263,17 +164,17 @@ def _merge_sparse_bins(labels: np.ndarray,
     if verbose:
         n_merged = len(sparse_bins)
         n_remaining = len(non_sparse_bins)
-        logger.info(f"Bin merge: {n_merged} sparse bins → {n_remaining} bins "
+        logger.info(f"Bin merge: {n_merged} sparse bins -> {n_remaining} bins "
                    f"(threshold={min_samples_per_bin})")
-        if n_merged <= 10:  # 只显示少量合并详情
+        if n_merged <= 10:
             for src, dst in merge_map.items():
-                logger.debug(f"  bin {src} → {dst}")
+                logger.debug(f"  bin {src} -> {dst}")
 
     return merged
 
 
 def _get_effective_n_splits(labels: Optional[np.ndarray], requested: int, n_samples: int) -> int:
-    """计算 CV 的有效折数（确保每折有足够样本）"""
+    """_get_effective_n_splits function."""
     if n_samples <= 1:
         return 2
     if labels is None:
@@ -283,22 +184,12 @@ def _get_effective_n_splits(labels: Optional[np.ndarray], requested: int, n_samp
     effective = min(requested, min_bin, n_samples)
     return max(2, effective)
 
-# summarize_folds 已移至 metrics.py，通过顶部导入使用
 
 # ============================================================
-# Stratified CV Protocol（主协议）
 # ============================================================
 
 class StratifiedCVProtocol:
-    """
-    主协议：Stratified K-Fold 交叉验证
-    
-    核心约束：
-    - 使用 P-T 分箱进行分层采样（stratify_labels）
-    - 确保每折的 P-T 分布与整体一致
-    - 所有拟合操作只在训练折进行
-
-    """
+    """StratifiedCVProtocol class."""
     
     def __init__(self,
                  n_splits: int = 10,
@@ -314,36 +205,11 @@ class StratifiedCVProtocol:
             corr_module: Optional[CorrectionModule] = None,
             stratify_labels: Optional[np.ndarray] = None,
             verbose: bool = True) -> Dict[str, Any]:
-        """
-        执行 Stratified K-Fold CV
-        
-        Parameters
-        ----------
-        X : np.ndarray
-            特征矩阵（原始，未标准化）
-        y : np.ndarray
-            目标值
-        pipeline_factory : Callable
-            返回新 Pipeline 实例的工厂函数
-        uncertainty_module : UncertaintyModule, optional
-            不确定性估计模块
-        verbose : bool
-            是否打印进度
-            
-        Returns
-        -------
-        results : dict
-            {
-                'fold_metrics': pd.DataFrame,  # 每折指标
-                'predictions': pd.DataFrame,   # 逐样本预测
-                'summary': dict,               # 汇总指标
-                'uncertainty': dict or None,   # 不确定性结果
-            }
-        """
+        """run function."""
         if stratify_labels is None:
             logger.warning(
-                "stratify_labels=None: 使用普通 KFold 而非 StratifiedKFold，"
-                "可能导致 CV 折间分布不平衡"
+                "stratify_labels=None: using plain KFold instead of StratifiedKFold; "
+                "this may cause imbalanced folds."
             )
             splitter = KFold(
                 n_splits=self.n_splits,
@@ -373,7 +239,6 @@ class StratifiedCVProtocol:
             y_train, y_val = y[train_idx], y[val_idx]
             stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
 
-            # 传入 fold_idx 确保不同折使用不同的数据增强种子
             pipeline = _call_pipeline_factory(pipeline_factory, self.random_seed, fold_idx)
 
             pipeline.fit(X_train, y_train, stratify_labels=stratify_train)
@@ -420,7 +285,6 @@ class StratifiedCVProtocol:
                 pipeline = record['pipeline']
                 pipeline.set_correction(corr_module, corr_model)
 
-                # 传入 fold_idx 确保各折使用不同的随机序列
                 dist = uncertainty_module.predict_distribution(
                     pipeline, record['X_val'], fold_idx=record['fold_id']
                 )
@@ -473,34 +337,28 @@ class StratifiedCVProtocol:
             'uncertainty': uncertainty_results,
             'corr_module': corr_module,
             'corr_model': corr_model,
-            'fold_records': fold_records,  # 用于保存模型
+            'fold_records': fold_records,
         }
 
 # ============================================================
-# 实验矩阵执行器
 # ============================================================
 
 @dataclass
 class ExperimentConfig:
-    """实验配置"""
-    exp_id: str                    # 实验ID
-    data_module_name: str          # M1 数据模块名称
-    model_module_name: str         # M2 模型模块名称
-    corr_module_name: str          # M3 校正模块名称
-    feature_set: str = 'Liquid'    # 特征集选择：'NoLiquid' 或 'Liquid'
+    """ExperimentConfig class."""
+    exp_id: str
+    data_module_name: str
+    model_module_name: str
+    corr_module_name: str
+    feature_set: str = 'Liquid'
     data_params: Dict = field(default_factory=dict)
     model_params: Dict = field(default_factory=dict)
     corr_params: Dict = field(default_factory=dict)
-    # M4 不确定性参数：n_mc, percentiles, feature_names 等
     uncertainty_params: Dict = field(default_factory=dict)
-    run_uncertainty: bool = False  # 是否运行 M4
+    run_uncertainty: bool = False
 
 class ExperimentMatrix:
-    """
-    实验矩阵执行器
-    
-    批量运行多个实验配置，保存结果
-    """
+    """ExperimentMatrix class."""
     
     def __init__(self,
                  X: np.ndarray,
@@ -508,20 +366,7 @@ class ExperimentMatrix:
                  y_P: np.ndarray,
                  output_dir: str = 'results',
                  target_names: Tuple[str, str] = ('T', 'P')):
-        """
-        Parameters
-        ----------
-        X : np.ndarray
-            特征矩阵
-        y_T : np.ndarray
-            温度目标
-        y_P : np.ndarray
-            压力目标
-        output_dir : str
-            输出目录
-        target_names : tuple
-            目标名称
-        """
+        """__init__ function."""
         self.X = X
         self.y_T = y_T
         self.y_P = y_P
@@ -529,7 +374,6 @@ class ExperimentMatrix:
         self.target_names = target_names
         
         os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(os.path.join(output_dir, 'figures'), exist_ok=True)
     
     def run_experiments(self,
                         configs: List[ExperimentConfig],
@@ -540,14 +384,7 @@ class ExperimentMatrix:
                         y_P_test: Optional[np.ndarray] = None,
                         random_seed: int = 42,
                         verbose: bool = True) -> pd.DataFrame:
-        """
-        运行实验矩阵
-        
-        Returns
-        -------
-        summary_df : pd.DataFrame
-            所有实验的汇总结果
-        """
+        """run_experiments function."""
         from .data_modules import get_data_module
         from .model_modules import get_model_module
         from .correction_modules import get_correction_module
@@ -557,8 +394,8 @@ class ExperimentMatrix:
         
         for config in configs:
             print(f"\n{'='*60}")
-            print(f"实验: {config.exp_id}")
-            print(f"配置: {config.data_module_name} + {config.model_module_name} + {config.corr_module_name}")
+            print(f"Experiment: {config.exp_id}")
+            print(f"Config: {config.data_module_name} + {config.model_module_name} + {config.corr_module_name}")
             print(f"{'='*60}")
 
             exp_result = {
@@ -569,12 +406,10 @@ class ExperimentMatrix:
                 'feature_set': config.feature_set,
             }
             
-            # 创建 pipeline 工厂
             def make_pipeline_factory(cfg):
                 def factory(seed: Optional[int] = None):
                     seed_value = random_seed if seed is None else seed
 
-                    # 统一使用 random_seed 参数（模型内部自行转换为 sklearn 的 random_state）
                     data_params = _apply_seed(cfg.data_params, ['random_seed'], seed_value)
                     model_params = _apply_seed(cfg.model_params, ['random_seed'], seed_value)
 
@@ -586,8 +421,6 @@ class ExperimentMatrix:
 
             pipeline_factory = make_pipeline_factory(config)
             
-            # 不确定性模块（从 config.uncertainty_params 读取参数）
-            # 从配置中汇总不确定性参数，避免目标间复用同一随机序列
             unc_params_base = None
             if config.run_uncertainty:
                 unc_params = {}
@@ -613,9 +446,8 @@ class ExperimentMatrix:
                     unc_params = dict(unc_params_base)
                     unc_params.setdefault('random_seed', target_seed)
                     unc_module = MCUncertaintyEstimator(**unc_params)
-                print(f"\n--- 目标: {target_name} ---")
+                print(f"\n--- Target: {target_name} ---")
                 
-                # 主协议
                 protocol = StratifiedCVProtocol(n_splits=n_splits, random_seed=target_seed)
                 corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
                 results = protocol.run(
@@ -627,19 +459,16 @@ class ExperimentMatrix:
                     verbose=verbose
                 )
                 
-                # 保存每折指标
                 results['fold_metrics'].to_csv(
                     os.path.join(self.output_dir, f'{config.exp_id}_{target_name}_fold_metrics.csv'),
                     index=False
                 )
                 
-                # 保存预测
                 results['predictions'].to_parquet(
                     os.path.join(self.output_dir, f'{config.exp_id}_{target_name}_predictions.parquet'),
                     index=False
                 )
                 
-                # 保存模型参数（用于离线绘图、特征重要性等）
                 import joblib
                 models_dir = os.path.join(self.output_dir, 'models')
                 os.makedirs(models_dir, exist_ok=True)
@@ -651,7 +480,7 @@ class ExperimentMatrix:
                 model_path = os.path.join(models_dir, f'{config.exp_id}_{target_name}_model.joblib')
                 joblib.dump({
                     'model': full_pipeline.get_model(),
-                    'model_module': full_pipeline.model_module,  # 保存model_module用于特征重要性等
+                    'model_module': full_pipeline.model_module,
                     'corr_model': results['corr_model'],
                     'data_state': full_pipeline._state,
                     'config': {
@@ -659,7 +488,7 @@ class ExperimentMatrix:
                         'data_module': config.data_module_name,
                         'model_module': config.model_module_name,
                         'corr_module': config.corr_module_name,
-                        'feature_set': config.feature_set,  # 特征集名称，供离线绘图获取特征名
+                        'feature_set': config.feature_set,
                     },
                 }, model_path)
 
@@ -672,13 +501,11 @@ class ExperimentMatrix:
                     for k, v in test_metrics.items():
                         exp_result[f'{target_name}_test_{k}'] = v
                 
-                # 汇总到结果
                 for k, v in results['summary'].items():
                     exp_result[f'{target_name}_{k}'] = v
 
             all_results.append(exp_result)
         
-        # 汇总 DataFrame
         summary_df = pd.DataFrame(all_results)
         summary_path = os.path.join(self.output_dir, 'metrics_summary.csv')
         if os.path.exists(summary_path):
@@ -734,7 +561,6 @@ class ExperimentMatrix:
                 def factory(seed: Optional[int] = None):
                     seed_value = random_seed if seed is None else seed
 
-                    # 稳定性测试需要变化种子，使用 force=True 强制覆盖配置中的固定种子
                     data_params = _apply_seed(cfg.data_params, ['random_seed'], seed_value, force=True)
                     model_params = _apply_seed(cfg.model_params, ['random_seed'], seed_value, force=True)
 
@@ -763,22 +589,14 @@ class ExperimentMatrix:
                     if os.path.exists(test_metrics_path):
                         latest_path = test_metrics_path
                     else:
-                        # 匹配新格式 xxx_checkpoint_task00020.csv 和旧格式 xxx_checkpoint_123.csv
                         pattern_new = re.compile(
                             rf"{re.escape(config.exp_id)}_{target_name}_checkpoint{re.escape(segment_suffix)}_task(\d+)\.csv"
-                        )
-                        pattern_old = re.compile(
-                            rf"{re.escape(config.exp_id)}_{target_name}_checkpoint{re.escape(segment_suffix)}_(\d+)\.csv"
                         )
                         checkpoints = []
                         for fname in os.listdir(stability_dir):
                             m = pattern_new.match(fname)
                             if m:
                                 checkpoints.append((int(m.group(1)), fname))
-                            else:
-                                m = pattern_old.match(fname)
-                                if m:
-                                    checkpoints.append((int(m.group(1)), fname))
                         if checkpoints:
                             checkpoints.sort()
                             latest_path = os.path.join(stability_dir, checkpoints[-1][1])
@@ -806,9 +624,7 @@ class ExperimentMatrix:
                 if start_repeat > repeat_end and verbose:
                     print(f"  Resume {target_name}: segment already complete")
 
-                # 预先计算用于子采样的 stratify labels（需要合并稀疏 bin 以避免划分失败）
                 if stratify_labels is not None:
-                    # 子采样需要较宽松的 min_samples（至少2个样本才能划分）
                     subsample_stratify = _merge_sparse_bins(stratify_labels, min_samples_per_bin=2)
                 else:
                     subsample_stratify = None
@@ -816,7 +632,6 @@ class ExperimentMatrix:
                 for i in range(start_repeat, repeat_end + 1):
                     seed = target_seed_base + i
 
-                    # 使用 stratify 约束子采样，保证训练子集的 P-T 分布与整体一致
                     if subsample_stratify is not None:
                         train_idx, _ = train_test_split(
                             idx_all,
@@ -960,13 +775,9 @@ class ExperimentMatrix:
         return effect_df
 
     def save_config(self, configs: List[ExperimentConfig], extra_info: Dict = None):
-        """保存实验配置（含版本信息用于结果追溯）"""
-        # 尝试导入版本信息函数
-        try:
-            from config import get_version_info
-            version_info = get_version_info()
-        except ImportError:
-            version_info = {'note': 'version info unavailable'}
+        """save_config function."""
+        from config import get_version_info
+        version_info = get_version_info()
 
         config_data = {
             'experiments': [
@@ -1001,3 +812,4 @@ class ExperimentMatrix:
         
         with open(os.path.join(self.output_dir, 'config_used.yaml'), 'w') as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
+

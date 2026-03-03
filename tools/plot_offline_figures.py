@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Offline plotting smoke test for available experiment artifacts.
@@ -15,6 +14,11 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import joblib
+import shap
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+from sklearn.model_selection import StratifiedKFold
 
 # Ensure repo root is on sys.path
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -28,7 +32,6 @@ from src.viz import (
     plot_pred_vs_true,
     plot_residuals,
     plot_correction_delta_scatter_tp,
-    plot_fold_comparison,
     plot_full_report,
     plot_correction_effect,
     plot_residual_distribution_comparison,
@@ -37,25 +40,16 @@ from src.viz import (
     plot_stability_overview,
     plot_combined_shap_summary,
     save_figure,
-    # V5.1 鏂板缁樺浘鍑芥暟锛堣鏂囧浘浠讹級
     plot_pt_grid_cv_splits,
     plot_feature_set_comparison_boxplot,
     plot_parity_comparison,
-    plot_m1_ablation_stepwise,
-    plot_performance_heatmap_matrix,
 )
 
-try:
-    import joblib
-    HAS_JOBLIB = True
-except ImportError:
-    HAS_JOBLIB = False
-
-# Delay SHAP import to runtime to avoid hard failures when SHAP deps are unavailable.
-shap = None
-HAS_SHAP = False
-
 logger = logging.getLogger(__name__)
+
+DEFAULT_SHAP_MAX_SAMPLES = 300
+DEFAULT_SHAP_BG_K = 50
+DEFAULT_SHAP_FORCE = True
 
 
 def _ensure_dir(path: str) -> None:
@@ -78,14 +72,6 @@ def _load_predictions(results_dir: str, exp_id: str, target: str) -> Optional[pd
         print(f"skip: missing {path}")
         return None
     return pd.read_parquet(path)
-
-
-def _load_fold_metrics(results_dir: str, exp_id: str, target: str) -> Optional[pd.DataFrame]:
-    path = os.path.join(results_dir, f"{exp_id}_{target}_fold_metrics.csv")
-    if not os.path.exists(path):
-        print(f"skip: missing {path}")
-        return None
-    return pd.read_csv(path)
 
 
 def _prepare_correction_df(df: pd.DataFrame, target: str) -> pd.DataFrame:
@@ -126,10 +112,7 @@ def _load_learning_curve_summary(learning_curve_dir: str) -> Optional[pd.DataFra
 
 
 def _load_model(results_dir: str, exp_id: str, target: str) -> Optional[Dict]:
-    """鍔犺浇淇濆瓨鐨勬ā鍨嬫枃浠?"""
-    if not HAS_JOBLIB:
-        print("skip: joblib not available for model loading")
-        return None
+    """Load a saved model artifact."""
     path = os.path.join(results_dir, "models", f"{exp_id}_{target}_model.joblib")
     if not os.path.exists(path):
         print(f"skip: missing {path}")
@@ -188,7 +171,7 @@ def _compute_shap_values(model: Any,
                          X_df: pd.DataFrame,
                          bg_k: int) -> Any:
     if _is_tree_model(model):
-        # BayesV5 path: use generic Explainer on tree models.
+        # Use SHAP's tree-aware explainer for tree-based models.
         explainer = shap.Explainer(model, X_df)
         shap_values = explainer(X_df)
     else:
@@ -516,16 +499,6 @@ def _plot_shap(exp_id: str,
                max_samples: int = 300,
                bg_k: int = 50,
                force: bool = False) -> None:
-    global shap, HAS_SHAP
-    if not HAS_SHAP:
-        try:
-            import shap as _shap
-            shap = _shap
-            HAS_SHAP = True
-        except Exception as e:
-            print(f"skip: shap not available ({e}), SHAP plotting disabled")
-            return
-
     for target in ['T', 'P']:
         model_data = _load_model(results_dir, exp_id, target)
         if model_data is None:
@@ -627,11 +600,7 @@ def _plot_correction_delta_scatter(results_dir: str, fig_dir: str, exp_id: str) 
         )
         print(f"saved: {save_path}")
 
-        try:
-            import matplotlib.pyplot as plt
-            plt.close(fig)
-        except Exception:
-            pass
+        plt.close(fig)
     except Exception as e:
         print(f"skip: correction delta scatter error: {e}")
 
@@ -641,13 +610,6 @@ def _plot_sampling_bias_triptych(data_path: str,
                                  data_encoding: str = "latin-1",
                                  grid_bins: int = 10) -> None:
     """Plot raw-data sampling-bias overview with two panels."""
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.colors import LogNorm
-    except Exception as e:
-        print(f"skip: sampling_bias_triptych plotting backend unavailable: {e}")
-        return
-
     if not os.path.exists(data_path):
         print(f"skip: missing data file for sampling bias figure: {data_path}")
         return
@@ -696,7 +658,7 @@ def _plot_sampling_bias_triptych(data_path: str,
     )
     axes[0].axhline(2.5, color="#ff7f0e", linestyle="--", linewidth=1.3, alpha=0.9, label="P = 2.5 kbar")
     axes[0].axhline(20.0, color="#d62728", linestyle="--", linewidth=1.3, alpha=0.9, label="P = 20 kbar")
-    axes[0].set_xlabel("Temperature T (掳C)")
+    axes[0].set_xlabel("Temperature T (°C)")
     axes[0].set_ylabel("Pressure P (kbar)")
     axes[0].set_title("A. P-T Density (Hexbin, log scale)")
     axes[0].legend(loc="upper right", fontsize=8, frameon=True)
@@ -736,7 +698,7 @@ def _plot_sampling_bias_triptych(data_path: str,
 
 
 def _plot_importance(exp_id: str, results_dir: str, fig_dir: str, feature_names: Optional[List[str]] = None) -> None:
-    """缁樺埗鐗瑰緛閲嶈鎬у浘锛堜粠淇濆瓨鐨勬ā鍨嬪姞杞斤級"""
+    """Plot feature importance from saved model artifacts."""
     for target in ['T', 'P']:
         model_data = _load_model(results_dir, exp_id, target)
         if model_data is None:
@@ -749,32 +711,32 @@ def _plot_importance(exp_id: str, results_dir: str, fig_dir: str, feature_names:
             print(f"skip: model is None for {exp_id}_{target}")
             continue
         
-        # 鑾峰彇鐗瑰緛閲嶈鎬э紙鏍规嵁涓嶅悓妯″瀷绫诲瀷澶勭悊锛?
+        # Collect feature importance using model-specific fallbacks.
         importances = None
 
-        # 鏂瑰紡1: 浣跨敤 model_module 鐨?get_feature_importance 鏂规硶
+        # Method 1: model_module.get_feature_importance(...)
         if model_module is not None and hasattr(model_module, 'get_feature_importance'):
             try:
                 importances = model_module.get_feature_importance(model)
             except Exception as e:
                 print(f"note: model_module.get_feature_importance failed for {exp_id}_{target}: {e}")
 
-        # 鏂瑰紡2: 鐩存帴浠庢ā鍨嬭幏鍙栵紙sklearn 妯″瀷锛?
+        # Method 2: direct access from model object (e.g., sklearn/CatBoost).
         if importances is None:
             if hasattr(model, 'feature_importances_'):
                 importances = model.feature_importances_
             elif hasattr(model, 'get_feature_importance'):
-                # CatBoost 妯″瀷
+                # CatBoost-style API
                 try:
                     importances = model.get_feature_importance()
                 except Exception:
                     pass
 
-        # 鏂瑰紡3: 瀵逛簬 Stacking锛堝瓧鍏哥被鍨嬫ā鍨嬶級锛屽皾璇曚粠鍩烘ā鍨嬭幏鍙?
+        # Method 3: for stacking dict models, average base-model importances.
         if importances is None and isinstance(model, dict):
             base_models = model.get('base', [])
             if base_models:
-                # 鏀堕泦鍚勫熀妯″瀷鐨勭壒寰侀噸瑕佹€у苟骞冲潎
+                # Aggregate importances from all available base models.
                 imp_list = []
                 for bm in base_models:
                     if hasattr(bm, 'feature_importances_'):
@@ -791,14 +753,14 @@ def _plot_importance(exp_id: str, results_dir: str, fig_dir: str, feature_names:
             print(f"skip: cannot extract feature importance for {exp_id}_{target}")
             continue
         
-        # 灏濊瘯鑾峰彇鐗瑰緛鍚嶇О
+        # Resolve feature names.
         names = feature_names
         if names is None:
-            # 鏂瑰紡1: 浠庝繚瀛樼殑 config 涓幏鍙?feature_set锛屾槧灏勫埌鐗瑰緛鍚嶇О
+            # Method 1: map feature_set from saved config.
             config = model_data.get('config', {})
             feature_set = config.get('feature_set')
             if feature_set:
-                # 瀹氫箟鐗瑰緛闆嗘槧灏勶紙涓?main.py CONFIG 淇濇寔涓€鑷达級
+                # Keep this mapping aligned with main.py config.
                 FEATURE_SETS = {
                     'NoLiquid': [
                         'SiO2.cpx', 'TiO2.cpx', 'Al2O3.cpx', 'Cr2O3.cpx',
@@ -813,7 +775,7 @@ def _plot_importance(exp_id: str, results_dir: str, fig_dir: str, feature_names:
                 }
                 names = FEATURE_SETS.get(feature_set)
         if names is None:
-            # 鏂瑰紡2: 灏濊瘯浠?data_state 鎺ㄦ柇
+            # Method 2: infer from serialized data_state.
             state = model_data.get('data_state')
             if state is not None and hasattr(state, 'feature_names'):
                 names = state.feature_names
@@ -823,7 +785,7 @@ def _plot_importance(exp_id: str, results_dir: str, fig_dir: str, feature_names:
         try:
             fig = plot_feature_importance(importances, names, target=target)
             _save_any(fig, os.path.join(fig_dir, f"{exp_id}_{target}_importance.png"))
-            print(f"鍥捐〃宸蹭繚瀛? {os.path.join(fig_dir, f'{exp_id}_{target}_importance.png')}")
+            print(f"saved: {os.path.join(fig_dir, f'{exp_id}_{target}_importance.png')}")
         except Exception as e:
             print(f"skip: error plotting importance for {exp_id}_{target}: {e}")
 
@@ -835,14 +797,14 @@ def _plot_basic(exp_id: str, results_dir: str, fig_dir: str) -> None:
         return
 
     # Pred vs true
-    fig = plot_pred_vs_true(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="掳C")
+    fig = plot_pred_vs_true(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="°C")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_T_pred_vs_true.png"))
 
     fig = plot_pred_vs_true(df_P["y_true"], df_P["y_pred_corr"], target_name="P", unit="kbar")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_P_pred_vs_true.png"))
 
     # Residuals
-    fig = plot_residuals(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="掳C")
+    fig = plot_residuals(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="°C")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_T_residuals.png"))
 
     fig = plot_residuals(df_P["y_true"], df_P["y_pred_corr"], target_name="P", unit="kbar")
@@ -872,40 +834,11 @@ def _plot_basic(exp_id: str, results_dir: str, fig_dir: str) -> None:
         print("skip: correction effect (P) missing columns")
 
 
-def _plot_fold(exp_id: str, results_dir: str, fig_dir: str) -> None:
-    df_T = _load_fold_metrics(results_dir, exp_id, "T")
-    df_P = _load_fold_metrics(results_dir, exp_id, "P")
-    if df_T is not None:
-        df_T = df_T.rename(columns={"rmse": "T_rmse", "mae": "T_mae", "r2": "T_r2"})
-        fig = plot_fold_comparison(df_T, target="T", metric="rmse")
-        _save_any(fig, os.path.join(fig_dir, f"{exp_id}_T_fold_rmse.png"))
-    if df_P is not None:
-        df_P = df_P.rename(columns={"rmse": "P_rmse", "mae": "P_mae", "r2": "P_r2"})
-        fig = plot_fold_comparison(df_P, target="P", metric="rmse")
-        _save_any(fig, os.path.join(fig_dir, f"{exp_id}_P_fold_rmse.png"))
-
-
-
-def _plot_stepwise(results_dir: str, fig_dir: str) -> None:
-    """缁樺埗闃舵寮忔晥鑳芥彁鍗囧浘锛堜娇鐢ㄦ柊鐨?M1 娑堣瀺鍑芥暟锛?"""
-    df = _load_metrics_summary(results_dir)
-    if df is None:
-        return
-
-    # 浣跨敤鏂扮殑 M1 娑堣瀺鍑芥暟锛堝浘 3-5锛?
-    for target in ['T', 'P']:
-        try:
-            fig = plot_m1_ablation_stepwise(df, target=target, model='ert', feature_set='liq')
-            _save_any(fig, os.path.join(fig_dir, f"m1_ablation_{target}.png"))
-        except Exception as e:
-            print(f"skip: m1_ablation_{target} error: {e}")
-
-
 def _plot_residual_compare(results_dir: str, fig_dir: str) -> None:
-    """娈嬪樊鍒嗗竷瀵规瘮鍥撅紙V5 鏇存柊锛氬姣?E07 vs E09锛屽嵆 ERT vs Stacking锛?"""
-    # V5 鏇存柊锛氬姣?Augmented 涓嬬殑 ERT vs Stacking
+    """Residual distribution comparison (E07 ERT vs E09 Stacking)."""
+    # Compare ERT vs Stacking under the Augmented setting.
     comp_map = {
-        "exp4_aug_corr": "E07_ert_augmented_none_liq",      # ERT锛堟渶浣抽厤缃級
+        "exp4_aug_corr": "E07_ert_augmented_none_liq",      # ERT (best setting)
         "exp5_stacking": "E09_stacking_augmented_none_liq",  # Stacking
     }
 
@@ -940,7 +873,7 @@ def _plot_residual_compare(results_dir: str, fig_dir: str) -> None:
 
 
 def _plot_feature_set_boxplot(results_dir: str, fig_dir: str) -> None:
-    """鍥?3-3锛氱壒寰侀泦鏁堣兘瀵规瘮绠辩嚎鍥?"""
+    """Figure 3-3: feature-set performance boxplot."""
     df = _load_metrics_summary(results_dir)
     if df is None:
         return
@@ -954,8 +887,8 @@ def _plot_feature_set_boxplot(results_dir: str, fig_dir: str) -> None:
 
 
 def _plot_parity_compare(results_dir: str, fig_dir: str) -> None:
-    """鍥?3-4锛氭渶浣虫ā鍨?1:1 棰勬祴瀵规瘮鍥撅紙NoLiquid vs Liquid锛?"""
-    # 鍔犺浇 E07 鐨勪袱涓増鏈?
+    """Figure 3-4: parity comparison (NoLiquid vs Liquid)."""
+    # Load two E07 variants.
     for target in ['T', 'P']:
         df_noliq = _load_predictions(results_dir, "E07_ert_augmented_none_noliq", target)
         df_liq = _load_predictions(results_dir, "E07_ert_augmented_none_liq", target)
@@ -976,22 +909,8 @@ def _plot_parity_compare(results_dir: str, fig_dir: str) -> None:
     _merge_parity_tp_image(fig_dir)
 
 
-def _plot_heatmap_matrix(results_dir: str, fig_dir: str) -> None:
-    """鍥?3-6锛氱畻娉暶楀鐞喢楁牎姝ｇ殑鎬ц兘鐑姏鍥?"""
-    df = _load_metrics_summary(results_dir)
-    if df is None:
-        return
-
-    for target in ['T', 'P']:
-        try:
-            fig = plot_performance_heatmap_matrix(df, target=target, feature_set='liq')
-            _save_any(fig, os.path.join(fig_dir, f"performance_heatmap_{target}.png"))
-        except Exception as e:
-            print(f"skip: performance_heatmap_{target} error: {e}")
-
-
 def _plot_stability(stability_exp_id: Optional[str], results_dir: str, fig_dir: str) -> None:
-    """绋冲畾鎬у垎甯冨浘锛堥噸澶嶅疄楠岋級"""
+    """Stability distribution figure from repeated experiments."""
     if not stability_exp_id:
         return
     df_T = _load_stability_metrics(results_dir, stability_exp_id, "T")
@@ -1007,7 +926,7 @@ def _plot_stability(stability_exp_id: Optional[str], results_dir: str, fig_dir: 
 
 
 def _plot_learning_curve(learning_curve_dir: str, fig_dir: str) -> None:
-    """瀛︿範鏇茬嚎鍒嗗竷鍥撅紙姹囨€伙級"""
+    """Learning-curve summary figure."""
     summary_df = _load_learning_curve_summary(learning_curve_dir)
     if summary_df is None:
         return
@@ -1022,37 +941,35 @@ def _plot_learning_curve(learning_curve_dir: str, fig_dir: str) -> None:
 
 
 def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> None:
-    """鍥?3-2锛歅-T 绌洪棿缃戞牸鍒嗗眰 CV 绀烘剰鍥?"""
+    """Figure 3-2: P-T grid stratified CV diagram."""
     try:
-        import pandas as pd
-        from sklearn.model_selection import StratifiedKFold
         from src.splitters import compute_pt_edges, assign_pt_bins
 
-        # 鍔犺浇鏁版嵁
+        # Load data.
         df = pd.read_csv(data_path, encoding='latin-1')
         y_T = df['T'].values
         y_P = df['P'].values
 
-        # 璁＄畻 P-T bins
+        # Compute P-T bins.
         pt_bins = compute_pt_edges(y_T, y_P)
         tp_labels = assign_pt_bins(y_T, y_P, pt_bins)
 
-        # 鍚堝苟绋€鐤?bins 浠ユ敮鎸佸垎灞?CV
+        # Merge sparse bins to make stratified CV feasible.
         n_splits = 10
         merged_labels = _merge_sparse_bins(tp_labels, min_samples_per_bin=n_splits)
 
-        # 妫€鏌ユ渶灏?bin 鏍锋湰鏁帮紝蹇呰鏃堕檷绾?n_splits
+        # Check the minimum bin count and downgrade n_splits if needed.
         _, bin_counts = np.unique(merged_labels, return_counts=True)
         effective_n_splits = min(n_splits, bin_counts.min())
         effective_n_splits = max(2, effective_n_splits)
 
-        # 鐢熸垚 fold 鍒嗛厤
+        # Generate fold assignments.
         skf = StratifiedKFold(n_splits=effective_n_splits, shuffle=True, random_state=random_seed)
         fold_assignments = np.zeros(len(y_T), dtype=int)
         for fold_id, (_, val_idx) in enumerate(skf.split(y_T, merged_labels)):
             fold_assignments[val_idx] = fold_id
 
-        # 缁樺浘锛堜娇鐢ㄥ師濮?tp_labels 鏄剧ず缃戞牸锛屼絾 fold 鍒嗛厤鍩轰簬鍚堝苟鍚庣殑鏍囩锛?
+        # Plot using raw tp_labels for display while folds come from merged labels.
         fig = plot_pt_grid_cv_splits(
             y_T, y_P, tp_labels, fold_assignments,
             pt_bins.p_edges, pt_bins.t_edges
@@ -1075,14 +992,6 @@ def main() -> int:
     parser.add_argument("--learning-curve-dir",
                         default=os.path.join(base_config["output_dir"], "learning_curve"))
     parser.add_argument("--correction-delta-exp-id", default="E10_ert_augmented_segmented_liq")
-    parser.add_argument("--enable-shap", action="store_true",
-                        help="Enable SHAP plots for --exp-id model.")
-    parser.add_argument("--shap-max-samples", type=int, default=300,
-                        help="Maximum number of rows used for SHAP plotting.")
-    parser.add_argument("--shap-bg-k", type=int, default=50,
-                        help="k used by shap.kmeans background sampling.")
-    parser.add_argument("--shap-force", action="store_true",
-                        help="Overwrite existing SHAP figures if they already exist.")
     parser.add_argument("--selected-only", action="store_true",
                         help="Generate only the retained figure set.")
     args = parser.parse_args()
@@ -1099,19 +1008,16 @@ def main() -> int:
         _plot_parity_compare(args.results_dir, fig_dir)
         _plot_learning_curve(args.learning_curve_dir, fig_dir)
 
-        if args.enable_shap:
-            _plot_shap(
-                exp_id=args.exp_id,
-                results_dir=args.results_dir,
-                fig_dir=fig_dir,
-                data_path=args.data_path,
-                data_encoding=base_config.get("data_encoding", "latin-1"),
-                max_samples=args.shap_max_samples,
-                bg_k=args.shap_bg_k,
-                force=args.shap_force,
-            )
-        else:
-            print("skip: SHAP disabled (set --enable-shap to generate TP SHAP figure)")
+        _plot_shap(
+            exp_id=args.exp_id,
+            results_dir=args.results_dir,
+            fig_dir=fig_dir,
+            data_path=args.data_path,
+            data_encoding=base_config.get("data_encoding", "latin-1"),
+            max_samples=DEFAULT_SHAP_MAX_SAMPLES,
+            bg_k=DEFAULT_SHAP_BG_K,
+            force=DEFAULT_SHAP_FORCE,
+        )
 
         _plot_correction_delta_scatter(args.results_dir, fig_dir, args.correction_delta_exp_id)
 
@@ -1128,14 +1034,11 @@ def main() -> int:
         return 0
 
     _plot_basic(args.exp_id, args.results_dir, fig_dir)
-    _plot_fold(args.exp_id, args.results_dir, fig_dir)
     _plot_importance(args.exp_id, args.results_dir, fig_dir)
 
     _plot_pt_grid_cv(args.data_path, fig_dir)
     _plot_feature_set_boxplot(args.results_dir, fig_dir)
     _plot_parity_compare(args.results_dir, fig_dir)
-    _plot_stepwise(args.results_dir, fig_dir)
-    _plot_heatmap_matrix(args.results_dir, fig_dir)
     _plot_residual_compare(args.results_dir, fig_dir)
     _plot_stability(args.stability_exp_id, args.results_dir, fig_dir)
     _plot_learning_curve(args.learning_curve_dir, fig_dir)
@@ -1146,17 +1049,16 @@ def main() -> int:
         data_encoding=base_config.get("data_encoding", "latin-1"),
     )
     _plot_correction_delta_scatter(args.results_dir, fig_dir, args.correction_delta_exp_id)
-    if args.enable_shap:
-        _plot_shap(
-            exp_id=args.exp_id,
-            results_dir=args.results_dir,
-            fig_dir=fig_dir,
-            data_path=args.data_path,
-            data_encoding=base_config.get("data_encoding", "latin-1"),
-            max_samples=args.shap_max_samples,
-            bg_k=args.shap_bg_k,
-            force=args.shap_force,
-        )
+    _plot_shap(
+        exp_id=args.exp_id,
+        results_dir=args.results_dir,
+        fig_dir=fig_dir,
+        data_path=args.data_path,
+        data_encoding=base_config.get("data_encoding", "latin-1"),
+        max_samples=DEFAULT_SHAP_MAX_SAMPLES,
+        bg_k=DEFAULT_SHAP_BG_K,
+        force=DEFAULT_SHAP_FORCE,
+    )
 
     print(f"plots saved under {fig_dir}")
     return 0
@@ -1172,7 +1074,6 @@ if __name__ == "__main__":
     try:
         exit_code = main()
     except Exception:
-        logger.exception("绂荤嚎缁樺浘杩愯寮傚父")
+        logger.exception("offline plotting failed")
         raise
     sys.exit(exit_code)
-

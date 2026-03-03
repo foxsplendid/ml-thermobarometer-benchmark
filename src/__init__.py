@@ -1,17 +1,11 @@
 # -*- coding: utf-8 -*-
-"""
-Chapter 3 Benchmark Protocol - 模块导出
-
-机器学习温压计模块化验证框架 v7.3.0
-"""
+"""Public exports for the thermobarometer benchmark package."""
 
 # ============================================================
-# 日志模块
 # ============================================================
 from .logger import get_logger, setup_logging
 
 # ============================================================
-# 接口定义
 # ============================================================
 from .interfaces import (
     DataModule,
@@ -22,7 +16,6 @@ from .interfaces import (
 )
 
 # ============================================================
-# M1 数据模块
 # ============================================================
 from .data_modules import (
     RawDataModule,
@@ -32,7 +25,6 @@ from .data_modules import (
 )
 
 # ============================================================
-# M2 模型模块
 # ============================================================
 from .model_modules import (
     ExtraTreesModel,
@@ -44,7 +36,6 @@ from .model_modules import (
 )
 
 # ============================================================
-# M3 校正模块
 # ============================================================
 from .correction_modules import (
     NoCorrection,
@@ -54,7 +45,6 @@ from .correction_modules import (
 )
 
 # ============================================================
-# M4 不确定性模块
 # ============================================================
 from .uncertainty_modules import (
     MCUncertaintyEstimator,
@@ -62,7 +52,6 @@ from .uncertainty_modules import (
 )
 
 # ============================================================
-# 扰动模块（共用于数据增强和误差传播）
 # ============================================================
 from .perturbation import (
     get_rel_err_vector,
@@ -82,7 +71,6 @@ from .protocol import (
 )
 
 # ============================================================
-# 指标与可视化
 # ============================================================
 from .metrics import (
     rmse,
@@ -92,11 +80,11 @@ from .metrics import (
     compute_all_metrics,
     compute_slope_intercept,
     compute_bias_stats,
-    summarize_folds,  # 直接从 metrics 导出，避免间接导出链
+    summarize_folds,
 )
 
 # ============================================================
-# 版本信息
 # ============================================================
 __version__ = '7.3.0'
 __author__ = 'ML Thermobarometer Benchmark Protocol'
+

@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-M2 模型模块 - ExtraTreesModel, CatBoostModel, StrictOOFStacking
-
-约束：Stacking使用严格OOF，内层CV生成元特征，禁止数据泄露
-"""
+"""Model-module implementations for baseline and ensemble regressors."""
 
 import os
 import time
@@ -16,58 +12,37 @@ from .interfaces import ModelModule
 
 
 # ============================================================
-# 并行配置辅助函数
 # ============================================================
 
 def _get_default_n_jobs() -> int:
-    """获取默认n_jobs：Windows=1，其他=-1"""
+    """_get_default_n_jobs function."""
     if os.name == 'nt':
         return 1
     return -1
 
 
 def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> Dict[str, Any]:
-    """
-    根据配置获取 CatBoost 的 task_type 参数
+    """_get_catboost_task_type function."""
+    from catboost.utils import get_gpu_device_count
 
-    Parameters
-    ----------
-    task_type : str
-        'auto' - 自动检测 GPU，有则用 GPU，无则用 CPU
-        'CPU' - 强制使用 CPU
-        'GPU' - 强制使用 GPU
-    gpu_devices : str
-        GPU 设备 ID
-
-    Returns
-    -------
-    Dict[str, Any]
-        CatBoost 的 task_type 和 devices 参数
-    """
     task_type_upper = task_type.upper().strip()
 
     if task_type_upper == 'CPU':
-        return {}  # CatBoost 默认使用 CPU
+        return {}
 
     if task_type_upper == 'GPU':
         return {'task_type': 'GPU', 'devices': gpu_devices}
 
-    # auto: 自动检测
-    try:
-        from catboost.utils import get_gpu_device_count
-        if get_gpu_device_count() >= 1:
-            return {'task_type': 'GPU', 'devices': gpu_devices}
-    except Exception:
-        pass
+    if get_gpu_device_count() >= 1:
+        return {'task_type': 'GPU', 'devices': gpu_devices}
     return {}
 
 
 # ============================================================
-# ExtraTrees 模型（基线）
 # ============================================================
 
 class ExtraTreesModel(ModelModule):
-    """ExtraTrees回归模型 - 集成基线"""
+    """ExtraTreesModel class."""
 
     def __init__(self, 
                  n_estimators: int = 200,
@@ -76,17 +51,15 @@ class ExtraTreesModel(ModelModule):
                  n_jobs: Optional[int] = None,
                  random_seed: int = 42,
                  **kwargs):
-        # n_jobs=None 表示自动检测
         if n_jobs is None:
             n_jobs = _get_default_n_jobs()
         
-        # 外部统一使用 random_seed，内部转换为 sklearn 的 random_state
         self.params = {
             'n_estimators': n_estimators,
             'max_depth': max_depth,
             'min_samples_split': min_samples_split,
             'n_jobs': n_jobs,
-            'random_state': random_seed,  # sklearn 使用 random_state
+            'random_state': random_seed,
             **kwargs
         }
         self._training_time = 0.0
@@ -96,7 +69,7 @@ class ExtraTreesModel(ModelModule):
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
-        """训练 ExtraTrees 模型"""
+        """fit function."""
         from sklearn.ensemble import ExtraTreesRegressor
         
         start_time = time.time()
@@ -108,32 +81,19 @@ class ExtraTreesModel(ModelModule):
         return model
     
     def predict(self, model: Any, X: np.ndarray) -> np.ndarray:
-        """预测"""
+        """predict function."""
         return model.predict(X)
     
     def get_feature_importance(self, model: Any) -> np.ndarray:
-        """获取特征重要性"""
+        """get_feature_importance function."""
         return model.feature_importances_
 
 
 # ============================================================
-# CatBoost 模型（强单模型）
 # ============================================================
 
 class CatBoostModel(ModelModule):
-    """
-    CatBoost 回归模型 - 强单模型代表
-    
-    特点：
-    - Boosting 方法，偏差校正能力强
-    - 支持类别特征（本项目不使用）
-    - 内置正则化，抗过拟合
-
-    GPU 控制（通过 config.py 集中配置）：
-    - 'auto': 自动检测 GPU，有则用，无则用 CPU
-    - 'CPU': 强制使用 CPU
-    - 'GPU': 强制使用 GPU
-    """
+    """CatBoostModel class."""
     
     def __init__(self,
                  iterations: Optional[int] = None,
@@ -145,26 +105,16 @@ class CatBoostModel(ModelModule):
                  task_type: Optional[str] = None,
                  gpu_devices: Optional[str] = None,
                  **kwargs):
-        # 从集中配置获取默认值
-        try:
-            from config import CONFIG as APP_CONFIG
-            cb_cfg = APP_CONFIG.model.catboost
-            default_iterations = cb_cfg.iterations
-            default_depth = cb_cfg.depth
-            default_learning_rate = cb_cfg.learning_rate
-            default_loss_function = cb_cfg.loss_function
-            default_task_type = cb_cfg.task_type
-            default_gpu_devices = cb_cfg.gpu_devices
-        except ImportError:
-            # 如果无法导入配置，使用硬编码默认值
-            default_iterations = 1000
-            default_depth = 6
-            default_learning_rate = 0.03
-            default_loss_function = 'RMSE'
-            default_task_type = 'auto'
-            default_gpu_devices = '0'
+        from config import CONFIG as APP_CONFIG
 
-        # 使用传入参数或配置默认值
+        cb_cfg = APP_CONFIG.model.catboost
+        default_iterations = cb_cfg.iterations
+        default_depth = cb_cfg.depth
+        default_learning_rate = cb_cfg.learning_rate
+        default_loss_function = cb_cfg.loss_function
+        default_task_type = cb_cfg.task_type
+        default_gpu_devices = cb_cfg.gpu_devices
+
         iterations = iterations if iterations is not None else default_iterations
         depth = depth if depth is not None else default_depth
         learning_rate = learning_rate if learning_rate is not None else default_learning_rate
@@ -172,7 +122,6 @@ class CatBoostModel(ModelModule):
         task_type = task_type if task_type is not None else default_task_type
         gpu_devices = gpu_devices if gpu_devices is not None else default_gpu_devices
 
-        # GPU 配置
         gpu_params = _get_catboost_task_type(task_type, gpu_devices)
 
         self.params = {
@@ -193,7 +142,7 @@ class CatBoostModel(ModelModule):
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
-        """训练 CatBoost 模型"""
+        """fit function."""
         from catboost import CatBoostRegressor, Pool
         
         start_time = time.time()
@@ -206,22 +155,19 @@ class CatBoostModel(ModelModule):
         return model
     
     def predict(self, model: Any, X: np.ndarray) -> np.ndarray:
-        """预测"""
+        """predict function."""
         return model.predict(X)
     
     def get_feature_importance(self, model: Any) -> np.ndarray:
-        """获取特征重要性"""
+        """get_feature_importance function."""
         return model.get_feature_importance()
 
 
 # ============================================================
-# RandomForest 模型（Stacking 基模型之一）
 # ============================================================
 
 class RandomForestModel(ModelModule):
-    """
-    RandomForest 回归模型 - Stacking 的基模型之一
-    """
+    """RandomForestModel class."""
     
     def __init__(self,
                  n_estimators: int = 200,
@@ -230,17 +176,15 @@ class RandomForestModel(ModelModule):
                  n_jobs: Optional[int] = None,
                  random_seed: int = 42,
                  **kwargs):
-        # n_jobs=None 表示自动检测
         if n_jobs is None:
             n_jobs = _get_default_n_jobs()
         
-        # 外部统一使用 random_seed，内部转换为 sklearn 的 random_state
         self.params = {
             'n_estimators': n_estimators,
             'max_depth': max_depth,
             'min_samples_split': min_samples_split,
             'n_jobs': n_jobs,
-            'random_state': random_seed,  # sklearn 使用 random_state
+            'random_state': random_seed,
             **kwargs
         }
         self._training_time = 0.0
@@ -250,7 +194,7 @@ class RandomForestModel(ModelModule):
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
-        """训练 RandomForest 模型"""
+        """fit function."""
         from sklearn.ensemble import RandomForestRegressor
         
         start_time = time.time()
@@ -262,35 +206,19 @@ class RandomForestModel(ModelModule):
         return model
     
     def predict(self, model: Any, X: np.ndarray) -> np.ndarray:
-        """预测"""
+        """predict function."""
         return model.predict(X)
 
     def get_feature_importance(self, model: Any) -> np.ndarray:
-        """获取特征重要性"""
+        """get_feature_importance function."""
         return model.feature_importances_
 
 
 # ============================================================
-# Strict OOF Stacking 模型
 # ============================================================
 
 class StrictOOFStacking(ModelModule):
-    """
-    严格 OOF Stacking 模型 - 完全防泄露的堆叠集成
-    
-    核心逻辑（严格 OOF）：
-    1. fit() 时：
-       - 在训练集上用 inner KFold 生成 OOF 元特征 Z_train
-       - 用 Z_train 训练 meta-learner
-       - 用全训练集重新训练所有 base models（供预测时使用）
-    
-    2. predict() 时：
-       - 用 fit() 时训练好的 base models 预测，得到 Z_val
-       - 用 meta-learner 预测最终结果
-    
-    基模型组合：ERT + CatBoost + RF（参数通过 base_model_params 传入）
-    元模型：Ridge（或 RidgeCV）
-    """
+    """StrictOOFStacking class."""
     
     def __init__(self,
                  base_models: Optional[List[ModelModule]] = None,
@@ -299,30 +227,14 @@ class StrictOOFStacking(ModelModule):
                  inner_cv: int = 5,
                  use_meta_scaler: bool = True,
                  random_seed: int = 42):
-        """
-        Parameters
-        ----------
-        base_models : List[ModelModule], optional
-            基模型列表（直接传入优先）
-        base_model_params : Dict[str, Dict[str, Any]], optional
-            基模型参数配置，格式：{'ert': {...}, 'catboost': {...}, 'rf': {...}}
-            当 base_models 为 None 时使用此参数创建基模型
-        meta_model : ModelModule, optional
-            元模型，默认为 RidgeModel
-        inner_cv : int
-            内层 CV 折数（用于生成 OOF 元特征）
-        use_meta_scaler : bool
-            是否对元特征进行标准化
-        """
+        """__init__ function."""
         self.inner_cv = inner_cv
         self.use_meta_scaler = use_meta_scaler
         self.random_seed = random_seed
         
-        # 基模型：优先使用直接传入的 base_models
         if base_models is not None:
             self.base_models = base_models
         elif base_model_params is not None:
-            # 使用配置参数创建基模型
             ert_params = base_model_params.get('ert', {})
             catboost_params = base_model_params.get('catboost', {})
             rf_params = base_model_params.get('rf', {})
@@ -332,18 +244,16 @@ class StrictOOFStacking(ModelModule):
                 RandomForestModel(random_seed=random_seed, **rf_params),
             ]
         else:
-            raise ValueError("必须提供 base_models 或 base_model_params 之一")
+            raise ValueError("Either base_models or base_model_params must be provided")
         
-        # 默认元模型：Ridge
         if meta_model is None:
             self.meta_model = RidgeModel(alpha=1.0)
         else:
             self.meta_model = meta_model
         
-        # 训练后的状态
         self._fitted_base_models: List[Any] = []
         self._meta_scaler: Optional[StandardScaler] = None
-        self._oof_meta_features: Optional[np.ndarray] = None  # 保存用于校正
+        self._oof_meta_features: Optional[np.ndarray] = None
         self._training_time = 0.0
         self._base_correlations: Optional[np.ndarray] = None
     
@@ -352,24 +262,12 @@ class StrictOOFStacking(ModelModule):
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Dict[str, Any]:
-        """
-        训练 Stacking 模型
-        
-        Returns
-        -------
-        model_dict : dict
-            {
-                'meta': 训练好的元模型,
-                'base': 训练好的基模型列表,
-                'meta_scaler': 元特征标准化器
-            }
-        """
+        """fit function."""
         start_time = time.time()
         
         n_samples = len(y_train)
         n_base = len(self.base_models)
         
-        # 1. 使用 inner KFold 生成 OOF 元特征（严格 OOF！）
         if stratify_labels is not None:
             splitter = StratifiedKFold(
                 n_splits=self.inner_cv,
@@ -391,31 +289,24 @@ class StrictOOFStacking(ModelModule):
             X_it, y_it = X_train[inner_train_idx], y_train[inner_train_idx]
             X_iv = X_train[inner_val_idx]
             
-            # 处理样本权重
             w_it = sample_weights[inner_train_idx] if sample_weights is not None else None
             
             for j, base_module in enumerate(self.base_models):
-                # 训练基模型
                 model = base_module.fit(X_it, y_it, w_it)
-                # 预测内层验证集
                 oof_meta[inner_val_idx, j] = base_module.predict(model, X_iv)
         
         self._oof_meta_features = oof_meta.copy()
         
-        # 计算基模型预测相关性（用于分析同质化问题）
         self._base_correlations = np.corrcoef(oof_meta.T)
         
-        # 2. 对元特征进行标准化（可选）
         if self.use_meta_scaler:
             self._meta_scaler = StandardScaler()
             oof_meta_scaled = self._meta_scaler.fit_transform(oof_meta)
         else:
             oof_meta_scaled = oof_meta
         
-        # 3. 训练元模型
         meta_fitted = self.meta_model.fit(oof_meta_scaled, y_train, sample_weights)
         
-        # 4. 用全训练集重新训练所有基模型（供预测时使用）
         self._fitted_base_models = []
         for base_module in self.base_models:
             model = base_module.fit(X_train, y_train, sample_weights)
@@ -430,20 +321,17 @@ class StrictOOFStacking(ModelModule):
         }
     
     def predict(self, model_dict: Dict[str, Any], X: np.ndarray) -> np.ndarray:
-        """预测"""
-        # 1. 用基模型预测，生成元特征
+        """predict function."""
         meta_features = np.column_stack([
             base_module.predict(fitted, X)
             for base_module, fitted in zip(self.base_models, model_dict['base'])
         ])
         
-        # 2. 标准化元特征
         if model_dict['meta_scaler'] is not None:
             meta_scaled = model_dict['meta_scaler'].transform(meta_features)
         else:
             meta_scaled = meta_features
         
-        # 3. 元模型预测
         return self.meta_model.predict(model_dict['meta'], meta_scaled)
     
     def get_oof_predictions(self,
@@ -453,61 +341,37 @@ class StrictOOFStacking(ModelModule):
                             sample_weights: Optional[np.ndarray] = None,
                             stratify_labels: Optional[np.ndarray] = None
                             ) -> np.ndarray:
-        """
-        返回严格 OOF 预测（用于偏差校正）
-
-        注意：此方法返回的是在 fit() 过程中已生成的 OOF 预测
-        （通过 inner CV 生成的元特征，再经过 meta-learner 预测）
-        stratify_labels 参数在此处未使用，因为 OOF 已经在 fit() 时生成。
-        """
-        # 使用已存储的 OOF 元特征
+        """get_oof_predictions function."""
         if self._oof_meta_features is None:
-            # 如果没有存储，需要重新计算（不推荐）
             return self.predict(model, X_train)
 
-        # 标准化元特征
         if self._meta_scaler is not None:
             oof_scaled = self._meta_scaler.transform(self._oof_meta_features)
         else:
             oof_scaled = self._oof_meta_features
 
-        # 元模型预测
         return self.meta_model.predict(model['meta'], oof_scaled)
     
     def get_base_correlations(self) -> Optional[np.ndarray]:
-        """返回基模型预测相关性矩阵"""
+        """get_base_correlations function."""
         return self._base_correlations
     
     def get_meta_weights(self, model_dict: Dict[str, Any]) -> Optional[np.ndarray]:
-        """返回元模型权重（如果是线性模型）"""
+        """get_meta_weights function."""
         return self.meta_model.get_weights(model_dict['meta'])
 
     def get_feature_importance(self, model_dict: Dict[str, Any]) -> Optional[np.ndarray]:
-        """
-        获取特征重要性（基于基模型的加权平均）
-
-        对于 Stacking 模型，返回各基模型特征重要性的加权平均，
-        权重为元模型的系数（如果可用）。
-
-        Returns
-        -------
-        np.ndarray or None
-            特征重要性数组，如果无法计算则返回 None
-        """
+        """get_feature_importance function."""
         if not self._fitted_base_models:
             return None
 
-        # 获取元模型权重作为加权系数
         meta_weights = self.get_meta_weights(model_dict)
         if meta_weights is None:
-            # 如果没有权重，使用等权平均
             meta_weights = np.ones(len(self._fitted_base_models)) / len(self._fitted_base_models)
         else:
-            # 归一化为正权重
             meta_weights = np.abs(meta_weights)
             meta_weights = meta_weights / meta_weights.sum()
 
-        # 收集各基模型的特征重要性
         importances_list = []
         for i, (base_mod, fitted_model) in enumerate(zip(self.base_models, self._fitted_base_models)):
             try:
@@ -521,20 +385,16 @@ class StrictOOFStacking(ModelModule):
         if not importances_list:
             return None
 
-        # 加权平均
         total_weight = sum(w for w, _ in importances_list)
         weighted_imp = sum(w * imp for w, imp in importances_list) / total_weight
         return weighted_imp
 
 
 # ============================================================
-# Ridge 元模型
 # ============================================================
 
 class RidgeModel(ModelModule):
-    """
-    Ridge 回归 - 用作 Stacking 的元模型
-    """
+    """RidgeModel class."""
     
     def __init__(self, alpha: float = 1.0):
         self.alpha = alpha
@@ -545,7 +405,7 @@ class RidgeModel(ModelModule):
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
-        """训练 Ridge 模型"""
+        """fit function."""
         from sklearn.linear_model import Ridge
         
         start_time = time.time()
@@ -557,34 +417,19 @@ class RidgeModel(ModelModule):
         return model
     
     def predict(self, model: Any, X: np.ndarray) -> np.ndarray:
-        """预测"""
+        """predict function."""
         return model.predict(X)
     
     def get_weights(self, model: Any) -> np.ndarray:
-        """获取回归系数"""
+        """get_weights function."""
         return model.coef_
 
 
 # ============================================================
-# 便捷工厂函数
 # ============================================================
 
 def get_model_module(name: str, **kwargs) -> ModelModule:
-    """
-    模型模块工厂函数
-    
-    Parameters
-    ----------
-    name : str
-        模块名称: 'ert' | 'extratrees' | 'catboost' | 'rf' | 'randomforest' | 'stacking'
-    **kwargs
-        模块参数
-        
-    Returns
-    -------
-    ModelModule
-        模型模块实例
-    """
+    """get_model_module function."""
     modules = {
         'ert': ExtraTreesModel,
         'extratrees': ExtraTreesModel,
@@ -597,10 +442,9 @@ def get_model_module(name: str, **kwargs) -> ModelModule:
     
     name_lower = name.lower().strip()
     if name_lower not in modules:
-        raise ValueError(f"未知模型模块: {name}，支持 {list(set(modules.values()))}")
+        raise ValueError(f"Unknown model module: {name}, supported: {list(set(modules.values()))}")
 
     if name_lower == 'stacking':
-        # 与 config.py 对齐：未显式传参时自动加载默认基模型与堆叠参数
         if 'base_models' not in kwargs and 'base_model_params' not in kwargs:
             from config import get_config_dict
             base_config = get_config_dict()
