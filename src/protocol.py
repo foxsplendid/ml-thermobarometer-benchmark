@@ -17,6 +17,10 @@ from .metrics import summarize_folds, compute_all_metrics
 
 logger = logging.getLogger(__name__)
 
+# Offset applied to the random seed for the pressure (P) target so that T and
+# P training runs use statistically independent random sequences while sharing
+# the same base seed.  1000 is large enough to avoid overlap with per-fold
+# seed increments (max expected n_splits ≤ 50).
 P_SEED_OFFSET = 1000
 
 def _derive_target_seed(base_seed: int, target_name: str) -> int:
@@ -66,14 +70,20 @@ class Pipeline:
     def fit(self,
             X_train: np.ndarray,
             y_train: np.ndarray,
-            stratify_labels: Optional[np.ndarray] = None) -> 'Pipeline':
+            stratify_labels: Optional[np.ndarray] = None,
+            fold_seed: Optional[int] = None) -> 'Pipeline':
         """fit function."""
         X2, y2, weights, self._state = self.data_module.fit_transform(
-            X_train, y_train
+            X_train, y_train, fold_seed=fold_seed
         )
         
         if stratify_labels is not None:
             if len(y2) > len(stratify_labels):
+                if len(y2) % len(stratify_labels) != 0:
+                    raise ValueError(
+                        f"Augmented dataset size ({len(y2)}) is not an exact multiple of "
+                        f"stratify_labels size ({len(stratify_labels)}); cannot broadcast labels."
+                    )
                 n_aug = len(y2) // len(stratify_labels)
                 stratify2 = np.tile(stratify_labels, n_aug)
             else:
@@ -100,15 +110,24 @@ class Pipeline:
         
         return y_pred
     
-    def predict_raw(self,
-                    X_raw: np.ndarray,
-                    apply_correction: bool = True) -> np.ndarray:
-        """predict_raw function."""
+    def predict_from_raw_input(self,
+                               X_raw: np.ndarray,
+                               apply_correction: bool = True) -> np.ndarray:
+        """Scale ``X_raw`` with the fitted scaler, then predict.
+
+        Parameters
+        ----------
+        X_raw:
+            Unscaled input features in original (physical) units.
+        apply_correction:
+            Whether to apply the post-hoc correction module (default ``True``).
+            Pass ``False`` to obtain raw model output before correction.
+        """
         if not self._is_fitted:
             raise RuntimeError("Pipeline is not fitted. Call fit() first.")
-        
+
         X_scaled, _ = self.data_module.transform(X_raw, self._state)
-        
+
         return self.predict(X_scaled, apply_correction)
     
     def get_model(self) -> Any:
@@ -240,8 +259,8 @@ class StratifiedCVProtocol:
             stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
 
             pipeline = _call_pipeline_factory(pipeline_factory, self.random_seed, fold_idx)
-
-            pipeline.fit(X_train, y_train, stratify_labels=stratify_train)
+            fold_seed = self.random_seed + fold_idx
+            pipeline.fit(X_train, y_train, stratify_labels=stratify_train, fold_seed=fold_seed)
 
             X_val_scaled, _ = pipeline.data_module.transform(X_val, pipeline._state)
             y_pred_raw = pipeline.predict(X_val_scaled, apply_correction=False)
@@ -677,7 +696,7 @@ class ExperimentMatrix:
                     corr_model = cv_results["corr_model"]
             
                     pipeline = pipeline_factory(seed)
-                    pipeline.fit(X_train, y_train, stratify_labels=stratify_train)
+                    pipeline.fit(X_train, y_train, stratify_labels=stratify_train, fold_seed=seed)
                     pipeline.set_correction(corr_module, corr_model)
             
                     X_test_scaled, _ = pipeline.data_module.transform(X_test, pipeline._state)

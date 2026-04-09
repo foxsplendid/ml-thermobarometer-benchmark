@@ -1,11 +1,27 @@
 # -*- coding: utf-8 -*-
 """Shared helpers for building experiment parameter dictionaries."""
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
-def build_model_params(base_config: Dict[str, Any], model_module: str, random_seed: int) -> Dict[str, Any]:
-    """Build model parameter dict from config defaults and module name."""
+def build_model_params(
+    base_config: Dict[str, Any],
+    model_module: str,
+    random_seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Build model parameter dict from config defaults and module name.
+
+    Parameters
+    ----------
+    base_config:
+        Top-level config dict (from ``get_config_dict()``).
+    model_module:
+        Module name key, e.g. ``'ert'``, ``'catboost'``, ``'stacking'``.
+    random_seed:
+        If provided, injected as ``random_seed`` in the returned dict.
+        When ``None`` the key is omitted and ``protocol._apply_seed`` will
+        inject the per-target / per-fold seed at runtime.
+    """
     model_defaults = base_config["model_defaults"]
     name = model_module.lower()
 
@@ -34,7 +50,8 @@ def build_model_params(base_config: Dict[str, Any], model_module: str, random_se
     else:
         params = {}
 
-    params["random_seed"] = random_seed
+    if random_seed is not None:
+        params["random_seed"] = random_seed
     return params
 
 
@@ -42,13 +59,28 @@ def build_data_params(
     base_config: Dict[str, Any],
     data_module: str,
     feature_set: str,
-    random_seed: int
+    random_seed: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Build data-module parameter dict from config defaults."""
+    """Build data-module parameter dict from config defaults.
+
+    Parameters
+    ----------
+    base_config:
+        Top-level config dict (from ``get_config_dict()``).
+    data_module:
+        Module name key, e.g. ``'raw'``, ``'balanced'``, ``'augmented'``.
+    feature_set:
+        Key into ``base_config['feature_sets']``, e.g. ``'Liquid'``.
+    random_seed:
+        If provided, injected as ``random_seed`` in the returned dict.
+        When ``None`` the key is omitted and ``protocol._apply_seed`` will
+        inject the per-target / per-fold seed at runtime.
+    """
     params: Dict[str, Any] = {
-        "random_seed": random_seed,
         "feature_names": list(base_config["feature_sets"][feature_set]),
     }
     if data_module.lower() == "augmented":
         params["n_aug"] = base_config["augmentation"]["n_aug"]
+    if random_seed is not None:
+        params["random_seed"] = random_seed
     return params

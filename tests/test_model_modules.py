@@ -131,13 +131,17 @@ class TestStrictOOFStacking:
             train_val_split['y_train']
         )
 
-        y_oof = module.get_oof_predictions(
-            model,
-            train_val_split['X_train'],
-            train_val_split['y_train']
-        )
+        y_oof = module.get_oof_predictions(model)
 
         assert len(y_oof) == len(train_val_split['y_train'])
+
+    def test_oof_predictions_before_fit_raises(self):
+        """test_oof_predictions_before_fit_raises function."""
+        base_models = [ExtraTreesModel(n_estimators=5, random_seed=42)]
+        module = StrictOOFStacking(base_models=base_models, inner_cv=2, random_seed=42)
+        dummy_model = {'meta': None, 'base': [], 'meta_scaler': None}
+        with pytest.raises(RuntimeError, match="fit\\(\\)"):
+            module.get_oof_predictions(dummy_model)
 
     def test_base_correlations(self, train_val_split):
         """test_base_correlations function."""
@@ -208,8 +212,18 @@ class TestGetModelModule:
 
     def test_get_stacking(self):
         """test_get_stacking function."""
-        module = get_model_module('stacking')
+        base_model_params = {
+            'ert': {'n_estimators': 5},
+            'catboost': {'iterations': 5},
+            'rf': {'n_estimators': 5},
+        }
+        module = get_model_module('stacking', base_model_params=base_model_params)
         assert isinstance(module, StrictOOFStacking)
+
+    def test_get_stacking_no_params_raises(self):
+        """test_get_stacking_no_params_raises function."""
+        with pytest.raises(ValueError, match="base_model_params"):
+            get_model_module('stacking')
 
     def test_aliases(self):
         """test_aliases function."""

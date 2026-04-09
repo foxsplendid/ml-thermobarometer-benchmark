@@ -19,26 +19,27 @@ class RawDataModule(DataModule):
         self.random_seed = random_seed
         self.feature_names = feature_names
     
-    def fit_transform(self, 
-                      X_train: np.ndarray, 
-                      y_train: np.ndarray
+    def fit_transform(self,
+                      X_train: np.ndarray,
+                      y_train: np.ndarray,
+                      fold_seed: Optional[int] = None,
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """fit_transform function."""
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_train)
-        
+
         sample_weights = np.ones(len(y_train), dtype=np.float64)
-        
+
         state = DataModuleState(
             scaler=scaler,
             feature_std=np.std(X_train, axis=0),
             feature_names=self.feature_names
         )
-        
+
         return X_scaled, y_train.copy(), sample_weights, state
-    
-    def transform(self, 
-                  X_val: np.ndarray, 
+
+    def transform(self,
+                  X_val: np.ndarray,
                   state: DataModuleState
                   ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """transform function."""
@@ -63,14 +64,15 @@ class BalancedDataModule(DataModule):
         self.random_seed = random_seed
         self.feature_names = feature_names
     
-    def fit_transform(self, 
-                      X_train: np.ndarray, 
-                      y_train: np.ndarray
+    def fit_transform(self,
+                      X_train: np.ndarray,
+                      y_train: np.ndarray,
+                      fold_seed: Optional[int] = None,
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """fit_transform function."""
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_train)
-        
+
         kbd = KBinsDiscretizer(
             n_bins=self.n_bins, 
             encode='ordinal', 
@@ -121,15 +123,18 @@ class AugmentedDataModule(DataModule):
         self.random_seed = random_seed
         self._fit_count = 0
 
-    def fit_transform(
-                      self, 
-                      X_train: np.ndarray, 
-                      y_train: np.ndarray
+    def fit_transform(self,
+                      X_train: np.ndarray,
+                      y_train: np.ndarray,
+                      fold_seed: Optional[int] = None,
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """fit_transform function."""
         from .perturbation import get_rel_err_vector, epma_perturb
 
-        effective_seed = self.random_seed + self._fit_count
+        if fold_seed is not None:
+            effective_seed = fold_seed
+        else:
+            effective_seed = self.random_seed + self._fit_count
         self._fit_count += 1
         rng = np.random.RandomState(effective_seed)
 

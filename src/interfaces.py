@@ -33,18 +33,16 @@ class DataModule(ABC):
         """_infer_feature_names function."""
         if feature_names is not None:
             return feature_names
-        if n_features == 18:
-            from config import DataConfig
-            return DataConfig().feature_sets['Liquid']
-        elif n_features == 9:
-            from config import DataConfig
-            return DataConfig().feature_sets['NoLiquid']
-        raise ValueError(f"Cannot infer feature names from n_features={n_features}; pass feature_names explicitly")
+        raise ValueError(
+            f"feature_names must be provided explicitly (got n_features={n_features}); "
+            "pass feature_names to the data module constructor."
+        )
 
     @abstractmethod
-    def fit_transform(self, 
-                      X_train: np.ndarray, 
-                      y_train: np.ndarray
+    def fit_transform(self,
+                      X_train: np.ndarray,
+                      y_train: np.ndarray,
+                      fold_seed: Optional[int] = None,
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """fit_transform function."""
         pass

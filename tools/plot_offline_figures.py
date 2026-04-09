@@ -584,7 +584,7 @@ def _plot_correction_delta_scatter(results_dir: str, fig_dir: str, exp_id: str) 
             p_true=df_p["y_true"].values,
             p_pred_raw=df_p["y_pred_raw"].values,
             p_pred_corr=df_p["y_pred_corr"].values,
-            title="Segmented Correction Effect",
+            title=None,
             t_unit=r"$^\circ$C",
             p_unit="kbar",
             bg_color="#ffffff",
@@ -608,7 +608,9 @@ def _plot_correction_delta_scatter(results_dir: str, fig_dir: str, exp_id: str) 
 def _plot_sampling_bias_triptych(data_path: str,
                                  fig_dir: str,
                                  data_encoding: str = "latin-1",
-                                 grid_bins: int = 10) -> None:
+                                 grid_bins: int = 10,
+                                 show_subplot_titles: bool = True,
+                                 show_suptitle: bool = False) -> None:
     """Plot raw-data sampling-bias overview with two panels."""
     if not os.path.exists(data_path):
         print(f"skip: missing data file for sampling bias figure: {data_path}")
@@ -660,7 +662,8 @@ def _plot_sampling_bias_triptych(data_path: str,
     axes[0].axhline(20.0, color="#d62728", linestyle="--", linewidth=1.3, alpha=0.9, label="P = 20 kbar")
     axes[0].set_xlabel("Temperature T (°C)")
     axes[0].set_ylabel("Pressure P (kbar)")
-    axes[0].set_title("A. P-T Density (Hexbin, log scale)")
+    if show_subplot_titles:
+        axes[0].set_title("a) P-T Density (Hexbin, log scale)")
     axes[0].legend(loc="upper right", fontsize=8, frameon=True)
     cbar0 = fig.colorbar(hb, ax=axes[0], shrink=0.9)
     cbar0.set_label("Samples per hex (log)")
@@ -669,7 +672,8 @@ def _plot_sampling_bias_triptych(data_path: str,
     axes[1].hist(y_p, bins=n_bins_1d, color="#1f77b4", alpha=0.75, edgecolor="white")
     axes[1].set_xlabel("Pressure P (kbar)")
     axes[1].set_ylabel("Count")
-    axes[1].set_title("B. Pressure Marginal Distribution")
+    if show_subplot_titles:
+        axes[1].set_title("b) Pressure Marginal Distribution")
     for thr, color in [(2.5, "#ff7f0e"), (10.0, "#2ca02c"), (20.0, "#d62728")]:
         axes[1].axvline(thr, color=color, linestyle="--", linewidth=1.2, alpha=0.9)
 
@@ -689,7 +693,8 @@ def _plot_sampling_bias_triptych(data_path: str,
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
     )
 
-    fig.suptitle(f"Raw Experimental Data Sampling Bias Overview (n={n_samples})", fontsize=14, y=1.02)
+    if show_suptitle:
+        fig.suptitle(f"Raw Experimental Data Sampling Bias Overview (n={n_samples})", fontsize=14, y=1.02)
     plt.tight_layout()
 
     out_path = os.path.join(fig_dir, "pt_sampling_bias_overview.png")
@@ -901,7 +906,13 @@ def _plot_parity_compare(results_dir: str, fig_dir: str) -> None:
         preds_liq = {'y_true': df_liq['y_true'].values, 'y_pred': df_liq['y_pred_corr'].values}
 
         try:
-            fig = plot_parity_comparison(preds_noliq, preds_liq, target=target)
+            fig = plot_parity_comparison(
+                preds_noliq,
+                preds_liq,
+                target=target,
+                show_subplot_titles=True,
+                show_suptitle=False,
+            )
             _save_any(fig, os.path.join(fig_dir, f"parity_compare_{target}.png"))
         except Exception as e:
             print(f"skip: parity_compare_{target} error: {e}")
@@ -972,7 +983,8 @@ def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Non
         # Plot using raw tp_labels for display while folds come from merged labels.
         fig = plot_pt_grid_cv_splits(
             y_T, y_P, tp_labels, fold_assignments,
-            pt_bins.p_edges, pt_bins.t_edges
+            pt_bins.p_edges, pt_bins.t_edges,
+            show_title=False,
         )
         _save_any(fig, os.path.join(fig_dir, "pt_grid_cv_splits.png"))
         if effective_n_splits < 10:

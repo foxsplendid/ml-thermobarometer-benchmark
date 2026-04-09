@@ -5,7 +5,6 @@ import pytest
 import numpy as np
 from src.correction_modules import (
     NoCorrection,
-    ResidualRegressionCorrector,
     SegmentedLinearCorrector,
     get_correction_module
 )
@@ -58,48 +57,6 @@ class TestNoCorrection:
         assert params['method'] == 'none'
 
 
-class TestResidualRegressionCorrector:
-    """TestResidualRegressionCorrector class."""
-
-    def test_reduces_rmse(self, biased_predictions):
-        """test_reduces_rmse function."""
-        y_true, y_pred = biased_predictions
-        module = ResidualRegressionCorrector()
-
-        corr_model = module.fit(y_true, y_pred)
-        y_corr = module.apply(corr_model, y_pred)
-
-        rmse_before = np.sqrt(np.mean((y_true - y_pred) ** 2))
-        rmse_after = np.sqrt(np.mean((y_true - y_corr) ** 2))
-
-        assert rmse_after < rmse_before
-
-    def test_slope_adjustment(self, biased_predictions):
-        """test_slope_adjustment function."""
-        y_true, y_pred = biased_predictions
-        module = ResidualRegressionCorrector()
-
-        corr_model = module.fit(y_true, y_pred)
-        y_corr = module.apply(corr_model, y_pred)
-
-        from scipy.stats import linregress
-        slope_before = linregress(y_pred, y_true).slope
-        slope_after = linregress(y_corr, y_true).slope
-
-        assert abs(slope_after - 1.0) < abs(slope_before - 1.0)
-
-    def test_get_correction_params(self, biased_predictions):
-        """test_get_correction_params function."""
-        y_true, y_pred = biased_predictions
-        module = ResidualRegressionCorrector()
-
-        corr_model = module.fit(y_true, y_pred)
-        params = module.get_correction_params(corr_model)
-
-        assert 'slope_before' in params
-        assert 'intercept_before' in params
-
-
 class TestSegmentedLinearCorrector:
     """TestSegmentedLinearCorrector class."""
 
@@ -147,11 +104,6 @@ class TestGetCorrectionModule:
         module = get_correction_module('none')
         assert isinstance(module, NoCorrection)
 
-    def test_get_residual(self):
-        """test_get_residual function."""
-        module = get_correction_module('residual')
-        assert isinstance(module, ResidualRegressionCorrector)
-
     def test_get_segmented(self):
         """test_get_segmented function."""
         module = get_correction_module('segmented')
@@ -161,4 +113,3 @@ class TestGetCorrectionModule:
         """test_invalid_name function."""
         with pytest.raises(ValueError):
             get_correction_module('invalid_correction')
-

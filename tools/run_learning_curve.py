@@ -446,7 +446,7 @@ Examples:
                         choices=['raw', 'balanced', 'augmented'],
                         help='Data module (default: augmented, best-performing data strategy)')
     parser.add_argument('--corr-module', type=str, default='none',
-                        choices=['none', 'residual', 'segmented'],
+                        choices=['none', 'segmented'],
                         help='Correction module (default: none)')
 
     parser.add_argument('--models', nargs='+', type=str, default=['ert', 'stacking'],

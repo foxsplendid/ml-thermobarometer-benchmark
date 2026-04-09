@@ -30,6 +30,7 @@ from .model_modules import (
     ExtraTreesModel,
     CatBoostModel,
     RandomForestModel,
+    SVRModel,
     StrictOOFStacking,
     RidgeModel,
     get_model_module,
@@ -39,7 +40,6 @@ from .model_modules import (
 # ============================================================
 from .correction_modules import (
     NoCorrection,
-    ResidualRegressionCorrector,
     SegmentedLinearCorrector,
     get_correction_module,
 )
