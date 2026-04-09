@@ -34,8 +34,8 @@ class TestPipeline:
         assert len(y_pred) == len(train_val_split['X_val'])
         assert not np.any(np.isnan(y_pred))
 
-    def test_predict_raw(self, train_val_split):
-        """test_predict_raw function."""
+    def test_predict_from_raw_input(self, train_val_split):
+        """test_predict_from_raw_input function."""
         pipeline = Pipeline(
             data_module=RawDataModule(),
             model_module=ExtraTreesModel(n_estimators=10, random_seed=42),
@@ -47,7 +47,7 @@ class TestPipeline:
             train_val_split['y_train']
         )
 
-        y_pred = pipeline.predict_raw(train_val_split['X_val'])
+        y_pred = pipeline.predict_from_raw_input(train_val_split['X_val'])
 
         assert len(y_pred) == len(train_val_split['X_val'])
 
@@ -60,7 +60,7 @@ class TestPipeline:
         )
 
         with pytest.raises(RuntimeError):
-            pipeline.predict_raw(train_val_split['X_val'])
+            pipeline.predict_from_raw_input(train_val_split['X_val'])
 
     def test_get_name(self):
         """test_get_name function."""

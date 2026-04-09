@@ -245,14 +245,14 @@ def _run_error_propagation(
         pipeline.fit(X_train, y_train)
 
         if config.corr_module_name != "none":
-            y_pred_train_raw = pipeline.predict_raw(X_train, apply_correction=False)
+            y_pred_train_raw = pipeline.predict_from_raw_input(X_train, apply_correction=False)
             corr_model = corr_mod.fit(y_train, y_pred_train_raw)
             pipeline.set_correction(corr_mod, corr_model)
         else:
             pipeline.set_correction(corr_mod, None)
 
-        y_pred_base_raw = pipeline.predict_raw(X_mc, apply_correction=False)
-        y_pred_base = pipeline.predict_raw(X_mc, apply_correction=True)
+        y_pred_base_raw = pipeline.predict_from_raw_input(X_mc, apply_correction=False)
+        y_pred_base = pipeline.predict_from_raw_input(X_mc, apply_correction=True)
 
         mc = MCUncertaintyEstimator(
             n_mc=n_mc,
@@ -356,7 +356,7 @@ Output:
                         choices=["ert", "extratrees", "catboost", "rf", "randomforest", "stacking"],
                         help="model module (default: ert)")
     parser.add_argument("--corr-module", default="none",
-                        choices=["none", "residual", "segmented"],
+                        choices=["none", "segmented"],
                         help="correction module (default: none)")
     parser.add_argument("--feature-set", default="Liquid",
                         choices=["NoLiquid", "Liquid"],

@@ -90,6 +90,14 @@ class ModelDefaults:
         'min_samples_split': 5,
     })
 
+    svr: Dict[str, Any] = field(default_factory=lambda: {
+        'kernel': 'rbf',
+        'C': 10.0,
+        'epsilon': 0.1,
+        'gamma': 'scale',
+        'linear_threshold': 5000,  # 样本数超过此值时自动切换 LinearSVR
+    })
+
 
 @dataclass
 class AugmentationConfig:
@@ -195,6 +203,7 @@ def get_config_dict() -> Dict[str, Any]:
             'stacking': CONFIG.model.stacking,  # Stacking: inner_cv=5
             'stacking_base_defaults': CONFIG.model.stacking_base_defaults,
             'rf': CONFIG.model.rf,              # RandomForest: n_estimators=200, max_depth=15
+            'svr': CONFIG.model.svr,            # SVR: RBF kernel, C=10
         },
 
         'augmentation': {

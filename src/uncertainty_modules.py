@@ -38,14 +38,11 @@ class MCUncertaintyEstimator(UncertaintyModule):
         feature_names = mc_params.get('feature_names', self.feature_names) if mc_params else self.feature_names
 
         if feature_names is None:
-            if X.shape[1] == 18:
-                from config import DataConfig
-                feature_names = DataConfig().feature_sets['Liquid']
-            elif X.shape[1] == 9:
-                from config import DataConfig
-                feature_names = DataConfig().feature_sets['NoLiquid']
-            else:
-                raise ValueError(f"Cannot infer feature_names from n_features={X.shape[1]}")
+            raise ValueError(
+                "feature_names must be provided explicitly to MCUncertaintyEstimator "
+                f"(got n_features={X.shape[1]}); pass feature_names to the constructor "
+                "or via mc_params['feature_names']."
+            )
 
         if len(feature_names) != X.shape[1]:
             raise ValueError("feature_names length must match X feature dimension")
@@ -56,7 +53,7 @@ class MCUncertaintyEstimator(UncertaintyModule):
 
         for i in range(n_mc):
             X_perturbed = epma_perturb(X, rel_err_vec, rng)
-            predictions[i] = pipeline.predict_raw(X_perturbed)
+            predictions[i] = pipeline.predict_from_raw_input(X_perturbed)
 
         percentiles = tuple(percentiles)
         pct_values = np.percentile(predictions, percentiles, axis=0)

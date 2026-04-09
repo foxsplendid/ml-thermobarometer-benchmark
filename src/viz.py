@@ -452,7 +452,8 @@ def plot_pt_grid_cv_splits(y_t: np.ndarray,
                            p_edges: np.ndarray,
                            t_edges: np.ndarray,
                            save_path: Optional[str] = None,
-                           figsize: Tuple[int, int] = (10, 8)) -> plt.Figure:
+                           figsize: Tuple[int, int] = (10, 8),
+                           show_title: bool = True) -> plt.Figure:
     """plot_pt_grid_cv_splits function."""
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -471,7 +472,8 @@ def plot_pt_grid_cv_splits(y_t: np.ndarray,
 
     ax.set_xlabel('Temperature T (°C)', fontsize=12)
     ax.set_ylabel('Pressure P (kbar)', fontsize=12)
-    ax.set_title('P-T Grid Stratified Cross-Validation', fontsize=14, fontweight='bold')
+    if show_title:
+        ax.set_title('P-T Grid Stratified Cross-Validation', fontsize=14, fontweight='bold')
 
     ax.legend(loc='upper left', fontsize=8, ncol=2, markerscale=1.5)
     ax.grid(False)
@@ -551,7 +553,9 @@ def plot_parity_comparison(preds_noliq: Dict[str, np.ndarray],
                            preds_liq: Dict[str, np.ndarray],
                            target: str = 'T',
                            save_path: Optional[str] = None,
-                           figsize: Tuple[int, int] = (12, 5)) -> plt.Figure:
+                           figsize: Tuple[int, int] = (12, 5),
+                           show_subplot_titles: bool = True,
+                           show_suptitle: bool = True) -> plt.Figure:
     """plot_parity_comparison function."""
     from .metrics import rmse, r2
 
@@ -572,7 +576,8 @@ def plot_parity_comparison(preds_noliq: Dict[str, np.ndarray],
     ax1.set_ylim(lims)
     ax1.set_xlabel(f'{target} True ({unit})', fontsize=11)
     ax1.set_ylabel(f'{target} Predicted ({unit})', fontsize=11)
-    ax1.set_title(f'NoLiquid (9 features)', fontsize=12, fontweight='bold')
+    if show_subplot_titles:
+        ax1.set_title(f'NoLiquid (9 features)', fontsize=12, fontweight='bold')
     ax1.set_aspect('equal')
     rmse_noliq = rmse(preds_noliq['y_true'], preds_noliq['y_pred'])
     r2_noliq = r2(preds_noliq['y_true'], preds_noliq['y_pred'])
@@ -587,7 +592,8 @@ def plot_parity_comparison(preds_noliq: Dict[str, np.ndarray],
     ax2.set_ylim(lims)
     ax2.set_xlabel(f'{target} True ({unit})', fontsize=11)
     ax2.set_ylabel(f'{target} Predicted ({unit})', fontsize=11)
-    ax2.set_title(f'Liquid (18 features)', fontsize=12, fontweight='bold')
+    if show_subplot_titles:
+        ax2.set_title(f'Liquid (18 features)', fontsize=12, fontweight='bold')
     ax2.set_aspect('equal')
     rmse_liq = rmse(preds_liq['y_true'], preds_liq['y_pred'])
     r2_liq = r2(preds_liq['y_true'], preds_liq['y_pred'])
@@ -596,7 +602,8 @@ def plot_parity_comparison(preds_noliq: Dict[str, np.ndarray],
              bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
     ax2.legend(loc='lower right')
 
-    fig.suptitle(f'{"Temperature" if target == "T" else "Pressure"} Prediction - Feature Set Comparison (1:1 Plot)', fontsize=14, fontweight='bold', y=1.02)
+    if show_suptitle:
+        fig.suptitle(f'{"Temperature" if target == "T" else "Pressure"} Prediction - Feature Set Comparison (1:1 Plot)', fontsize=14, fontweight='bold', y=1.02)
 
     plt.tight_layout()
 
@@ -701,7 +708,7 @@ def plot_correction_delta_scatter_tp(t_true: np.ndarray,
                                      p_true: np.ndarray,
                                      p_pred_raw: np.ndarray,
                                      p_pred_corr: np.ndarray,
-                                     title: str = "Segmented Correction Effect",
+                                     title: Optional[str] = "Segmented Correction Effect",
                                      t_unit: str = r"$^\circ$C",
                                      p_unit: str = "kbar",
                                      bg_color: str = "#ffffff",
@@ -916,8 +923,12 @@ def plot_correction_delta_scatter_tp(t_true: np.ndarray,
             stat_va="bottom",
         )
 
-        fig.suptitle(title, fontsize=15, y=0.985)
-        fig.subplots_adjust(top=0.955, left=0.08, right=0.95, bottom=0.05)
+        if title:
+            fig.suptitle(title, fontsize=15, y=0.985)
+            top = 0.955
+        else:
+            top = 0.98
+        fig.subplots_adjust(top=top, left=0.08, right=0.95, bottom=0.05)
         return fig
 
 

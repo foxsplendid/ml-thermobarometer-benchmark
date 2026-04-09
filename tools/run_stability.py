@@ -168,7 +168,7 @@ Examples:
                         choices=["ert", "extratrees", "catboost", "rf", "randomforest", "stacking"],
                         help="Model module")
     parser.add_argument("--corr-module", default="none",
-                        choices=["none", "residual", "segmented"],
+                        choices=["none", "segmented"],
                         help="Correction module")
     parser.add_argument("--feature-set", default="Liquid",
                         choices=["NoLiquid", "Liquid"],

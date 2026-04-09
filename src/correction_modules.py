@@ -9,6 +9,13 @@ from .interfaces import CorrectionModule
 # ============================================================
 # ============================================================
 
+DEFAULT_N_SEGMENTS: int = 3
+DEFAULT_SEGMENT_QUANTILES = [1 / 3, 2 / 3]
+MIN_SEGMENT_SAMPLES: int = 5
+
+# ============================================================
+# ============================================================
+
 class NoCorrection(CorrectionModule):
     """NoCorrection class."""
 
@@ -29,100 +36,16 @@ class NoCorrection(CorrectionModule):
 # ============================================================
 # ============================================================
 
-class ResidualRegressionCorrector(CorrectionModule):
-    """ResidualRegressionCorrector class."""
-    
-    def __init__(self, 
-                 method: str = 'ridge',
-                 alpha: float = 1.0,
-                 use_polynomial: bool = False,
-                 poly_degree: int = 2):
-        """__init__ function."""
-        self.method = method
-        self.alpha = alpha
-        self.use_polynomial = use_polynomial
-        self.poly_degree = poly_degree
-    
-    def fit(self, 
-            y_true_train: np.ndarray, 
-            y_pred_train: np.ndarray) -> Dict[str, Any]:
-        """fit function."""
-        from sklearn.linear_model import Ridge, LinearRegression
-        from sklearn.preprocessing import PolynomialFeatures
-        
-        residuals = y_true_train - y_pred_train
-        
-        X_pred = y_pred_train.reshape(-1, 1)
-        
-        poly_features = None
-        if self.use_polynomial:
-            poly_features = PolynomialFeatures(degree=self.poly_degree, include_bias=False)
-            X_features = poly_features.fit_transform(X_pred)
-        else:
-            X_features = X_pred
-        
-        if self.method == 'ridge':
-            residual_model = Ridge(alpha=self.alpha)
-        else:
-            residual_model = LinearRegression()
-        
-        residual_model.fit(X_features, residuals)
-        
-        from scipy.stats import linregress
-        reg_result = linregress(y_pred_train, y_true_train)
-        
-        return {
-            'residual_model': residual_model,
-            'poly_features': poly_features,
-            'slope': reg_result.slope,
-            'intercept': reg_result.intercept,
-            'method': self.method
-        }
-    
-    def apply(self, corr_model: Dict[str, Any], y_pred: np.ndarray) -> np.ndarray:
-        """apply function."""
-        X_pred = y_pred.reshape(-1, 1)
-        
-        if corr_model['poly_features'] is not None:
-            X_features = corr_model['poly_features'].transform(X_pred)
-        else:
-            X_features = X_pred
-        
-        predicted_residual = corr_model['residual_model'].predict(X_features)
-        
-        return y_pred + predicted_residual
-    
-    def get_correction_params(self, corr_model: Dict[str, Any]) -> Dict[str, float]:
-        """get_correction_params function."""
-        if corr_model is None:
-            return {}
-        
-        result = {
-            'method': corr_model.get('method', 'unknown'),
-            'slope_before': corr_model.get('slope', np.nan),
-            'intercept_before': corr_model.get('intercept', np.nan),
-        }
-        
-        model = corr_model.get('residual_model')
-        if model is not None and hasattr(model, 'coef_'):
-            result['residual_coef'] = float(model.coef_[0]) if len(model.coef_) == 1 else 0.0
-            result['residual_intercept'] = float(model.intercept_)
-        
-        return result
-
-# ============================================================
-# ============================================================
-
 class SegmentedLinearCorrector(CorrectionModule):
     """SegmentedLinearCorrector class."""
 
     def __init__(self,
-                 n_segments: int = 3,
+                 n_segments: int = DEFAULT_N_SEGMENTS,
                  quantiles: Optional[list] = None,
                  clip_to_train_range: bool = True):
         """__init__ function."""
         self.n_segments = n_segments
-        self.quantiles = quantiles or [1/3, 2/3]
+        self.quantiles = quantiles if quantiles is not None else DEFAULT_SEGMENT_QUANTILES
         self.clip_to_train_range = clip_to_train_range
 
     def fit(self,
@@ -141,7 +64,7 @@ class SegmentedLinearCorrector(CorrectionModule):
             if i == len(boundaries) - 2:
                 mask = (y_pred_train >= boundaries[i]) & (y_pred_train <= boundaries[i + 1])
 
-            if np.sum(mask) < 5:
+            if np.sum(mask) < MIN_SEGMENT_SAMPLES:
                 segment_models.append(None)
                 continue
 
@@ -212,7 +135,6 @@ def get_correction_module(name: str, **kwargs) -> CorrectionModule:
     """get_correction_module function."""
     modules = {
         'none': NoCorrection,
-        'residual': ResidualRegressionCorrector,
         'segmented': SegmentedLinearCorrector,
     }
     

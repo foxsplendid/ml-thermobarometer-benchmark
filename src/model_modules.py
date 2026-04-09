@@ -15,10 +15,19 @@ from .interfaces import ModelModule
 # ============================================================
 
 def _get_default_n_jobs() -> int:
-    """_get_default_n_jobs function."""
-    if os.name == 'nt':
-        return 1
-    return -1
+    """Return the default n_jobs for sklearn parallel estimators.
+
+    读取环境变量 ``ML_N_JOBS``（整数）以允许外部并行脚本精确控制每个模型
+    占用的线程数，避免多实验并发时线程过度竞争。
+    未设置时默认 -1（使用全部逻辑核心）。
+    """
+    env_val = os.environ.get('ML_N_JOBS')
+    if env_val is not None:
+        try:
+            return int(env_val)
+        except ValueError:
+            pass
+    return -1  # 使用全部可用核心（移除原 Windows 限制）
 
 
 def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> Dict[str, Any]:
@@ -96,32 +105,15 @@ class CatBoostModel(ModelModule):
     """CatBoostModel class."""
     
     def __init__(self,
-                 iterations: Optional[int] = None,
-                 depth: Optional[int] = None,
-                 learning_rate: Optional[float] = None,
-                 loss_function: Optional[str] = None,
+                 iterations: int = 1000,
+                 depth: int = 6,
+                 learning_rate: float = 0.03,
+                 loss_function: str = 'RMSE',
                  random_seed: int = 42,
                  silent: bool = True,
-                 task_type: Optional[str] = None,
-                 gpu_devices: Optional[str] = None,
+                 task_type: str = 'auto',
+                 gpu_devices: str = '0',
                  **kwargs):
-        from config import CONFIG as APP_CONFIG
-
-        cb_cfg = APP_CONFIG.model.catboost
-        default_iterations = cb_cfg.iterations
-        default_depth = cb_cfg.depth
-        default_learning_rate = cb_cfg.learning_rate
-        default_loss_function = cb_cfg.loss_function
-        default_task_type = cb_cfg.task_type
-        default_gpu_devices = cb_cfg.gpu_devices
-
-        iterations = iterations if iterations is not None else default_iterations
-        depth = depth if depth is not None else default_depth
-        learning_rate = learning_rate if learning_rate is not None else default_learning_rate
-        loss_function = loss_function if loss_function is not None else default_loss_function
-        task_type = task_type if task_type is not None else default_task_type
-        gpu_devices = gpu_devices if gpu_devices is not None else default_gpu_devices
-
         gpu_params = _get_catboost_task_type(task_type, gpu_devices)
 
         self.params = {
@@ -217,6 +209,101 @@ class RandomForestModel(ModelModule):
 # ============================================================
 # ============================================================
 
+class SVRModel(ModelModule):
+    """SVRModel — 核方法回归，为 Stacking 提供与树模型正交的归纳偏置。
+
+    输入应已标准化（Pipeline 通过 DataModule 在 fit_transform 中完成缩放）。
+    SVR 本身无随机性，random_seed 参数仅为保持接口统一，不影响输出。
+
+    自动规模切换策略：
+      n_samples <= linear_threshold : 使用 SVR(RBF)，O(n²) 但核方法精度高
+      n_samples >  linear_threshold : 自动切换到 LinearSVR，O(n)，避免增强
+                                       数据集上的内存/时间爆炸（~30k 样本时
+                                       RBF 核矩阵需 5GB+ 内存，耗时数小时）
+    """
+
+    # 样本数超过此阈值时自动切换 LinearSVR
+    LINEAR_THRESHOLD: int = 5_000
+
+    def __init__(self,
+                 kernel: str = 'rbf',
+                 C: float = 10.0,
+                 epsilon: float = 0.1,
+                 gamma: str = 'scale',
+                 linear_threshold: Optional[int] = None,
+                 random_seed: int = 42,
+                 **kwargs):
+        """__init__ function."""
+        self.kernel = kernel
+        self.C = C
+        self.epsilon = epsilon
+        self.gamma = gamma
+        self.linear_threshold = linear_threshold if linear_threshold is not None \
+            else self.LINEAR_THRESHOLD
+        self.extra_kwargs = kwargs
+        self._training_time = 0.0
+
+    def fit(self,
+            X_train: np.ndarray,
+            y_train: np.ndarray,
+            sample_weights: Optional[np.ndarray] = None,
+            stratify_labels: Optional[np.ndarray] = None) -> Any:
+        """fit function."""
+        start_time = time.time()
+
+        if X_train.shape[0] > self.linear_threshold:
+            # 大数据集：LinearSVR，O(n) 复杂度
+            from sklearn.svm import LinearSVR
+            model = LinearSVR(
+                C=self.C,
+                epsilon=self.epsilon,
+                max_iter=10000,
+                **{k: v for k, v in self.extra_kwargs.items()
+                   if k not in ('gamma',)}  # LinearSVR 不接受 gamma
+            )
+        else:
+            # 小数据集：RBF-SVR，保留核方法归纳偏置
+            from sklearn.svm import SVR
+            model = SVR(
+                kernel=self.kernel,
+                C=self.C,
+                epsilon=self.epsilon,
+                gamma=self.gamma,
+                **self.extra_kwargs,
+            )
+
+        model.fit(X_train, y_train, sample_weight=sample_weights)
+        self._training_time = time.time() - start_time
+        return model
+
+    def predict(self, model: Any, X: np.ndarray) -> np.ndarray:
+        """predict function."""
+        return model.predict(X)
+
+    def get_feature_importance(self, model: Any) -> np.ndarray:
+        """get_feature_importance function."""
+        # SVR/LinearSVR 无树结构，返回空数组
+        return np.array([])
+
+
+# ============================================================
+# ============================================================
+
+# 模型键到构造器的注册表，供 StrictOOFStacking 动态构建基学习器使用
+def _build_base_model_registry(random_seed: int) -> Dict[str, Any]:
+    """_build_base_model_registry function."""
+    return {
+        'ert':      lambda p: ExtraTreesModel(random_seed=random_seed, **p),
+        'catboost': lambda p: CatBoostModel(random_seed=random_seed, **p),
+        'rf':       lambda p: RandomForestModel(random_seed=random_seed, **p),
+        'svr':      lambda p: SVRModel(random_seed=random_seed, **p),
+        'ridge':    lambda p: RidgeModel(**p),
+    }
+
+
+# ============================================================
+# ============================================================
+
 class StrictOOFStacking(ModelModule):
     """StrictOOFStacking class."""
     
@@ -235,14 +322,15 @@ class StrictOOFStacking(ModelModule):
         if base_models is not None:
             self.base_models = base_models
         elif base_model_params is not None:
-            ert_params = base_model_params.get('ert', {})
-            catboost_params = base_model_params.get('catboost', {})
-            rf_params = base_model_params.get('rf', {})
-            self.base_models = [
-                ExtraTreesModel(random_seed=random_seed, **ert_params),
-                CatBoostModel(random_seed=random_seed, **catboost_params),
-                RandomForestModel(random_seed=random_seed, **rf_params),
-            ]
+            registry = _build_base_model_registry(random_seed)
+            self.base_models = []
+            for key, params in base_model_params.items():
+                if key not in registry:
+                    raise ValueError(
+                        f"Unknown base model key: {key!r}. "
+                        f"Supported keys: {list(registry.keys())}"
+                    )
+                self.base_models.append(registry[key](params))
         else:
             raise ValueError("Either base_models or base_model_params must be provided")
         
@@ -334,16 +422,10 @@ class StrictOOFStacking(ModelModule):
         
         return self.meta_model.predict(model_dict['meta'], meta_scaled)
     
-    def get_oof_predictions(self,
-                            model: Dict[str, Any],
-                            X_train: np.ndarray,
-                            y_train: np.ndarray,
-                            sample_weights: Optional[np.ndarray] = None,
-                            stratify_labels: Optional[np.ndarray] = None
-                            ) -> np.ndarray:
+    def get_oof_predictions(self, model: Dict[str, Any]) -> np.ndarray:
         """get_oof_predictions function."""
         if self._oof_meta_features is None:
-            return self.predict(model, X_train)
+            raise RuntimeError("get_oof_predictions() called before fit(); call fit() first.")
 
         if self._meta_scaler is not None:
             oof_scaled = self._meta_scaler.transform(self._oof_meta_features)
@@ -437,6 +519,7 @@ def get_model_module(name: str, **kwargs) -> ModelModule:
         'cb': CatBoostModel,
         'rf': RandomForestModel,
         'randomforest': RandomForestModel,
+        'svr': SVRModel,
         'stacking': StrictOOFStacking,
     }
     
@@ -446,25 +529,10 @@ def get_model_module(name: str, **kwargs) -> ModelModule:
 
     if name_lower == 'stacking':
         if 'base_models' not in kwargs and 'base_model_params' not in kwargs:
-            from config import get_config_dict
-            base_config = get_config_dict()
-            model_defaults = base_config.get('model_defaults', {})
-
-            base_model_params = {
-                'ert': dict(model_defaults.get('ert', {})),
-                'catboost': dict(model_defaults.get('catboost', {})),
-                'rf': dict(model_defaults.get('rf', {})),
-            }
-            for key, override in model_defaults.get('stacking_base_defaults', {}).items():
-                if key in base_model_params and isinstance(override, dict):
-                    base_model_params[key].update(override)
-
-            kwargs['base_model_params'] = base_model_params
-
-            stacking_params = model_defaults.get('stacking', {})
-            kwargs.setdefault('inner_cv', stacking_params.get('inner_cv', 5))
-            kwargs.setdefault('use_meta_scaler', stacking_params.get('use_meta_scaler', True))
-            kwargs.setdefault('random_seed', base_config.get('random_seed', 42))
+            raise ValueError(
+                "get_model_module('stacking') requires either base_models or base_model_params; "
+                "pass base_model_params={'ert': {...}, 'catboost': {...}, 'rf': {...}} explicitly."
+            )
 
     return modules[name_lower](**kwargs)
 

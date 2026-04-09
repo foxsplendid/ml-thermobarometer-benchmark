@@ -101,9 +101,11 @@ class TestAugmentedDataModule:
 
     def test_augmentation_increases_samples(self, sample_data_large):
         """test_augmentation_increases_samples function."""
+        from config import DataConfig
         X, y = sample_data_large
         n_aug = 5
-        module = AugmentedDataModule(n_aug=n_aug)
+        feature_names = DataConfig().feature_sets['Liquid']
+        module = AugmentedDataModule(n_aug=n_aug, feature_names=feature_names)
         X2, y2, _, _ = module.fit_transform(X, y)
 
         expected_size = len(X) * (1 + n_aug)
@@ -112,8 +114,10 @@ class TestAugmentedDataModule:
 
     def test_original_samples_preserved(self, sample_data_large):
         """test_original_samples_preserved function."""
+        from config import DataConfig
         X, y = sample_data_large
-        module = AugmentedDataModule(n_aug=3)
+        feature_names = DataConfig().feature_sets['Liquid']
+        module = AugmentedDataModule(n_aug=3, feature_names=feature_names)
         X2, y2, _, state = module.fit_transform(X, y)
 
         original_size = len(X)
@@ -123,26 +127,52 @@ class TestAugmentedDataModule:
 
     def test_transform_no_augmentation(self, sample_data_large):
         """test_transform_no_augmentation function."""
+        from config import DataConfig
         X, y = sample_data_large
         X_train, X_val = X[:400], X[400:]
         y_train = y[:400]
-        module = AugmentedDataModule(n_aug=5)
+        feature_names = DataConfig().feature_sets['Liquid']
+        module = AugmentedDataModule(n_aug=5, feature_names=feature_names)
         _, _, _, state = module.fit_transform(X_train, y_train)
 
         X_val_scaled, _ = module.transform(X_val, state)
         assert X_val_scaled.shape == X_val.shape
 
-    def test_feature_name_inference(self, sample_data_large):
-        """test_feature_name_inference function."""
-        from config import DataConfig
-
+    def test_missing_feature_names_raises(self, sample_data_large):
+        """test_missing_feature_names_raises function."""
         X, y = sample_data_large
         module = AugmentedDataModule(n_aug=2)
+        with pytest.raises(ValueError, match="feature_names must be provided explicitly"):
+            module.fit_transform(X, y)
+
+    def test_explicit_feature_names_stored(self, sample_data_large):
+        """test_explicit_feature_names_stored function."""
+        from config import DataConfig
+        X, y = sample_data_large
+        feature_names = DataConfig().feature_sets['Liquid']
+        module = AugmentedDataModule(n_aug=2, feature_names=feature_names)
         _, _, _, state = module.fit_transform(X, y)
 
-        assert state.feature_names is not None
-        assert len(state.feature_names) == X.shape[1]
-        assert state.feature_names == DataConfig().feature_sets['Liquid']
+        assert state.feature_names == feature_names
+
+    def test_fold_seed_determinism(self, sample_data_large):
+        """test_fold_seed_determinism function."""
+        from config import DataConfig
+        X, y = sample_data_large
+        feature_names = DataConfig().feature_sets['Liquid']
+
+        module_a = AugmentedDataModule(n_aug=2, feature_names=feature_names)
+        X2_a, _, _, _ = module_a.fit_transform(X, y, fold_seed=77)
+
+        module_b = AugmentedDataModule(n_aug=2, feature_names=feature_names)
+        X2_b, _, _, _ = module_b.fit_transform(X, y, fold_seed=77)
+
+        assert np.allclose(X2_a, X2_b), "Same fold_seed must produce identical augmented data"
+
+        module_c = AugmentedDataModule(n_aug=2, feature_names=feature_names)
+        X2_c, _, _, _ = module_c.fit_transform(X, y, fold_seed=99)
+
+        assert not np.allclose(X2_a, X2_c), "Different fold_seeds should produce different augmented data"
 
 
 class TestGetDataModule:

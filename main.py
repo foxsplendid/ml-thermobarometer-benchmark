@@ -21,6 +21,7 @@ if PROJECT_ROOT not in sys.path:
 # ============================================================
 # ============================================================
 from config import get_config_dict
+from src.experiment_params import build_model_params, build_data_params
 from src.logger import setup_logging, get_logger
 
 CONFIG = get_config_dict()
@@ -58,53 +59,20 @@ def get_experiment_configs():
         {'data': 'augmented', 'model': 'stacking', 'corr': 'segmented'},
     ]
 
-    ert_params = CONFIG['model_defaults']['ert']
-    catboost_params = CONFIG['model_defaults']['catboost']
-    rf_params = CONFIG['model_defaults']['rf']
-    stacking_params = CONFIG['model_defaults'].get('stacking', {})
-    stacking_base_params = {
-        'ert': dict(ert_params),
-        'catboost': dict(catboost_params),
-        'rf': dict(rf_params),
-    }
-    stacking_base_overrides = CONFIG['model_defaults'].get('stacking_base_defaults', {})
-    for name, params in stacking_base_overrides.items():
-        if name in stacking_base_params and isinstance(params, dict):
-            stacking_base_params[name].update(params)
-
-    aug_params = CONFIG['augmentation']
-
     final_configs = []
     for idx, base in enumerate(base_configs, start=1):
         for fset in ['NoLiquid', 'Liquid']:
             suffix = 'noliq' if fset == 'NoLiquid' else 'liq'
             exp_id = f"E{idx:02d}_{base['model']}_{base['data']}_{base['corr']}_{suffix}"
-
-            model_params = {}
-            if base['model'] == 'ert':
-                model_params.update(ert_params)
-            elif base['model'] == 'catboost':
-                model_params.update(catboost_params)
-            elif base['model'] == 'stacking':
-                model_params['base_model_params'] = stacking_base_params
-                if stacking_params:
-                    model_params['inner_cv'] = stacking_params.get('inner_cv')
-                    model_params['use_meta_scaler'] = stacking_params.get('use_meta_scaler')
-
-            data_params = {
-                'feature_names': list(CONFIG['feature_sets'][fset]),
-            }
-            if base['data'] == 'augmented':
-                data_params['n_aug'] = aug_params['n_aug']
-
             final_configs.append(ExperimentConfig(
                 exp_id=exp_id,
                 data_module_name=base['data'],
                 model_module_name=base['model'],
                 corr_module_name=base['corr'],
                 feature_set=fset,
-                data_params=data_params,
-                model_params=model_params,
+                # random_seed omitted: protocol._apply_seed injects per-target seed at runtime
+                data_params=build_data_params(CONFIG, base['data'], fset),
+                model_params=build_model_params(CONFIG, base['model']),
                 run_uncertainty=False,
             ))
 
