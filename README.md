@@ -58,8 +58,8 @@ ml-thermobarometer-benchmark/
 ├── config.py
 ├── requirements.txt
 ├── README.md
-├── CHANGELOG.md
 ├── REPRODUCIBILITY.md
+├── pytest.ini
 ├── src/
 │   ├── interfaces.py
 │   ├── data_modules.py
@@ -107,53 +107,79 @@ from src import (
 print('OK')
 ```
 
-### 2.2 Quick Test
+### 2.2 Quick Test (~2 min, 4 experiments, 2 folds)
 ```bash
 python main.py --test
 ```
 
-### 2.3 Main Benchmark (24 experiments)
+### 2.3 Main Benchmark (24 experiments, 10-fold CV)
 ```bash
 python main.py
 ```
+
+Parallelism is auto-configured based on available CPU cores. To override:
+```bash
+ML_N_JOBS=4 ML_FOLD_WORKERS=8 python main.py   # explicit config
+ML_FOLD_WORKERS=1 python main.py                # force sequential
+```
+
+See `REPRODUCIBILITY.md` for the full parallelism reference.
 
 ## 3. Sub-Experiment Scripts
 
 ### 3.1 Stability Analysis
 ```bash
-python tools/run_stability.py --exp-id E07_stability_nj4 --model-module ert --data-module augmented --corr-module none --feature-set Liquid --n-repeats 1000
-```
+# Default: ERT + augmented + Liquid, 1000 repeats, auto parallel workers
+python tools/run_stability.py
 
-Merge segmented runs:
-```bash
-python tools/run_stability.py --merge-dir results --exp-id E07_stability_nj4 --output-dir results
+# Custom model and repeat count
+python tools/run_stability.py --model-module catboost --n-repeats 500
+
+# Force sequential
+python tools/run_stability.py --repeat-workers 1
 ```
 
 ### 3.2 Learning-Curve Analysis
 ```bash
-python tools/run_learning_curve.py --feature-set liq --models ert stacking --repeats 30 --n-splits 10
-```
+# Default: ERT + CatBoost + Stacking, Liquid, 30 repeats, auto parallel workers
+python tools/run_learning_curve.py
 
-Merge segmented runs:
-```bash
+# NoLiquid feature set
+python tools/run_learning_curve.py --feature-set noliq
+
+# Merge segmented runs
 python tools/run_learning_curve.py --merge-dir results/learning_curve --output-dir results/learning_curve
 ```
 
-### 3.3 Analysis Error Propagation
+### 3.3 Error Propagation
 ```bash
-python tools/run_error_propagation.py --exp-id E07_ert_augmented_none_liq --model-module ert --data-module augmented --corr-module none --feature-set Liquid --n-mc 1000
+# Default: ERT + augmented + Liquid, 1000 MC samples
+python tools/run_error_propagation.py
 ```
 
-### 3.4 Offline Plotting 
+### 3.4 Offline Plotting
 ```bash
 python tools/plot_offline_figures.py --selected-only
 ```
 
 Notes:
 - This script only reads existing artifacts under `results/` and does not retrain models.
-- SHAP runs by default in the offline plotting flow with internal defaults: `max_samples=300`, `bg_k=50`, `force=True`.
+- SHAP runs by default with internal defaults: `max_samples=300`, `bg_k=50`, `force=True`.
 
-## 4. Key Outputs
+## 4. Running Tests
+
+```bash
+pytest tests/ -v                # all fast tests
+pytest tests/ --runslow         # include slow integration tests
+pytest tests/ --cov=src         # with coverage report
+```
+
+`pytest.ini` registers a `slow` marker so that slow integration tests
+(multi-fold training runs) are skipped by default and only executed when
+`--runslow` is explicitly passed. This keeps the default test run fast
+(seconds) without losing coverage of the full pipeline.
+
+## 5. Key Outputs
 
 - `results/metrics_summary.csv`: main benchmark summary.
 - `results/effect_table.csv`: effect table relative to baseline.
@@ -163,7 +189,7 @@ Notes:
 - `results/error_propagation/`: error-propagation outputs.
 - `results/figures/`: offline plotting outputs.
 
-## 5. Module API Index
+## 6. Module API Index
 
 - Data modules: `src/data_modules.py`
 - Model modules: `src/model_modules.py`
@@ -176,7 +202,28 @@ Notes:
 - Shared utilities (perturbation, splitters, experiment params, logging): `src/utils.py`
 
 See `REPRODUCIBILITY.md` for the seed strategy, resource model, and the
-full end-to-end reproduction recipe. See `CHANGELOG.md` for the version
-history.
+full end-to-end reproduction recipe.
+
+---
+
+# Part III: Version History
+
+## 1.0.0 — Initial public release
+
+First public release of the ML Thermobarometer Benchmark companion code.
+Consolidates the prior internal V1–V7 development iterations into a clean,
+reproducible release with portable resource handling, fold-level
+parallelism, unified sub-experiment workflows, and end-to-end reproducibility
+documentation.
+
+**Internal development history**
+
+- `V1`: Initial modular experiment framework.
+- `V2`: Added dual feature sets and stratified evaluation design.
+- `V3`: Improved data-augmentation and correction strategy comparison.
+- `V4`: Stabilized the main protocol and fixed test-set workflow.
+- `V5`: Refactored the experiment matrix and figure workflow.
+- `V6`: Centralized configuration and split the toolchain.
+- `V7`: Unified main/sub-experiment workflows and improved offline plotting and error-propagation pipelines.
 
 ---
