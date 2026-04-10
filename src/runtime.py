@@ -100,6 +100,17 @@ def get_fold_backend() -> str:
     return env_val
 
 
+def is_parallel_worker() -> bool:
+    """Return ``True`` when the current process was spawned as a parallel worker.
+
+    Worker entry points (fold-level, repeat-level, task-level) set
+    ``ML_PARALLEL_WORKER=1`` in the subprocess environment before doing any
+    work.  Callers that need to suppress GPU usage or nested parallelism should
+    consult this function rather than reading the env var directly.
+    """
+    return os.environ.get("ML_PARALLEL_WORKER") == "1"
+
+
 def log_runtime_info() -> None:
     """Log a one-line summary of the active runtime configuration."""
     import multiprocessing

@@ -22,6 +22,79 @@ from .pipeline import (
 )
 
 
+def _save_cv_artifacts(
+    output_dir: str,
+    exp_id: str,
+    target_name: str,
+    fold_metrics_df: "pd.DataFrame",
+    predictions_df: "pd.DataFrame",
+) -> None:
+    """Persist fold-level metrics (CSV) and OOF predictions (parquet) to disk."""
+    fold_metrics_df.to_csv(
+        os.path.join(output_dir, f"{exp_id}_{target_name}_fold_metrics.csv"), index=False
+    )
+    predictions_df.to_parquet(
+        os.path.join(output_dir, f"{exp_id}_{target_name}_predictions.parquet"), index=False
+    )
+
+
+def _fit_full_pipeline(
+    pipeline_factory: Any,
+    target_seed: int,
+    X: "np.ndarray",
+    y: "np.ndarray",
+    stratify_labels: Optional["np.ndarray"],
+    corr_module: Any,
+    corr_model: Any,
+) -> "Pipeline":
+    """Fit a fresh pipeline on the full training set and attach the correction model."""
+    pipeline = call_pipeline_factory(pipeline_factory, target_seed)
+    pipeline.fit(X, y, stratify_labels=stratify_labels)
+    pipeline.set_correction(corr_module, corr_model)
+    return pipeline
+
+
+def _serialize_pipeline(
+    output_dir: str,
+    exp_id: str,
+    target_name: str,
+    pipeline: "Pipeline",
+    corr_model: Any,
+    config: "ExperimentConfig",
+) -> None:
+    """Serialize a fitted pipeline to a joblib file under ``output_dir/models/``."""
+    import joblib
+    models_dir = os.path.join(output_dir, "models")
+    os.makedirs(models_dir, exist_ok=True)
+    joblib.dump(
+        {
+            "model": pipeline.get_model(),
+            "model_module": pipeline.model_module,
+            "corr_model": corr_model,
+            "data_state": pipeline.get_data_state(),
+            "config": {
+                "exp_id": config.exp_id,
+                "data_module": config.data_module_name,
+                "model_module": config.model_module_name,
+                "corr_module": config.corr_module_name,
+                "feature_set": config.feature_set,
+            },
+        },
+        os.path.join(models_dir, f"{exp_id}_{target_name}_model.joblib"),
+    )
+
+
+def _compute_test_metrics(
+    pipeline: "Pipeline",
+    X_test: "np.ndarray",
+    y_test: "np.ndarray",
+) -> Dict[str, Any]:
+    """Return metrics dict for the fitted pipeline evaluated on a held-out test set."""
+    y_pred_raw = pipeline.predict_from_raw_input(X_test, apply_correction=False)
+    y_pred_corr = pipeline.predict_from_raw_input(X_test, apply_correction=True)
+    return compute_all_metrics(y_test, y_pred_corr, y_pred_raw)
+
+
 def _run_single_stability_repeat(
     repeat_id: int,
     X: np.ndarray,
@@ -41,19 +114,24 @@ def _run_single_stability_repeat(
     n_splits: int,
     target_seed_base: int,
     random_seed: int,
+    is_worker: bool = False,
 ) -> Dict[str, Any]:
     """Run one stability repeat in an isolated worker process.
 
     Designed to be picklable by joblib loky so it can be dispatched to a
-    worker process without carrying closure state.  Each worker forces
-    ``ML_FOLD_WORKERS=1`` to avoid nested process-pool conflicts.
+    worker process without carrying closure state.  When dispatched as a
+    parallel worker (``is_worker=True``), forces ``ML_FOLD_WORKERS=1`` to
+    avoid nested process-pool conflicts.  Sequential callers must leave
+    ``is_worker`` at its default (``False``) to preserve the parent-process
+    parallelism settings.
     """
-    import os as _os
-    # Signal to CatBoost that this is a parallel worker process — GPU must not
-    # be used as multiple workers would contend for the same device.
-    _os.environ["ML_PARALLEL_WORKER"] = "1"
-    # Disable nested fold-level parallelism to avoid process over-subscription.
-    _os.environ["ML_FOLD_WORKERS"] = "1"
+    if is_worker:
+        import os as _os
+        # Signal to CatBoost that this is a parallel worker process — GPU must
+        # not be used as multiple workers would contend for the same device.
+        _os.environ["ML_PARALLEL_WORKER"] = "1"
+        # Disable nested fold-level parallelism to avoid process over-subscription.
+        _os.environ["ML_FOLD_WORKERS"] = "1"
 
     from sklearn.model_selection import train_test_split as _tts
     from ..data_modules import get_data_module
@@ -115,11 +193,7 @@ def _run_single_stability_repeat(
     pipeline.fit(X_train, y_train, stratify_labels=stratify_train, fold_seed=seed)
     pipeline.set_correction(corr_mod, corr_model)
 
-    X_test_scaled, _ = pipeline.data_module.transform(X_test, pipeline._state)
-    y_pred_raw = pipeline.predict(X_test_scaled, apply_correction=False)
-    y_pred_corr = corr_mod.apply(corr_model, y_pred_raw)
-
-    metrics = compute_all_metrics(y_test, y_pred_corr, y_pred_raw)
+    metrics = _compute_test_metrics(pipeline, X_test, y_test)
     metrics["repeat_id"] = repeat_id
     metrics["n_splits_requested"] = n_splits
     metrics["n_splits_used"] = effective_n_splits
@@ -256,57 +330,24 @@ class ExperimentMatrix:
                     verbose=verbose,
                 )
 
-                results["fold_metrics"].to_csv(
-                    os.path.join(
-                        self.output_dir, f"{config.exp_id}_{target_name}_fold_metrics.csv"
-                    ),
-                    index=False,
+                _save_cv_artifacts(
+                    self.output_dir, config.exp_id, target_name,
+                    results["fold_metrics"], results["predictions"],
                 )
 
-                results["predictions"].to_parquet(
-                    os.path.join(
-                        self.output_dir, f"{config.exp_id}_{target_name}_predictions.parquet"
-                    ),
-                    index=False,
+                full_pipeline = _fit_full_pipeline(
+                    pipeline_factory, target_seed,
+                    self.X, y, stratify_labels,
+                    results["corr_module"], results["corr_model"],
                 )
-
-                import joblib
-                models_dir = os.path.join(self.output_dir, "models")
-                os.makedirs(models_dir, exist_ok=True)
-
-                full_pipeline = call_pipeline_factory(pipeline_factory, target_seed)
-                full_pipeline.fit(self.X, y, stratify_labels=stratify_labels)
-                full_pipeline.set_correction(results["corr_module"], results["corr_model"])
-
-                model_path = os.path.join(
-                    models_dir, f"{config.exp_id}_{target_name}_model.joblib"
+                _serialize_pipeline(
+                    self.output_dir, config.exp_id, target_name,
+                    full_pipeline, results["corr_model"], config,
                 )
-                joblib.dump({
-                    "model": full_pipeline.get_model(),
-                    "model_module": full_pipeline.model_module,
-                    "corr_model": results["corr_model"],
-                    "data_state": full_pipeline._state,
-                    "config": {
-                        "exp_id": config.exp_id,
-                        "data_module": config.data_module_name,
-                        "model_module": config.model_module_name,
-                        "corr_module": config.corr_module_name,
-                        "feature_set": config.feature_set,
-                    },
-                }, model_path)
 
                 y_test = y_T_test if target_name == "T" else y_P_test
                 if X_test is not None and y_test is not None:
-                    X_test_scaled, _ = full_pipeline.data_module.transform(
-                        X_test, full_pipeline._state
-                    )
-                    y_test_pred_raw = full_pipeline.predict(X_test_scaled, apply_correction=False)
-                    y_test_pred_corr = full_pipeline.corr_module.apply(
-                        full_pipeline._corr_model, y_test_pred_raw
-                    )
-                    test_metrics = compute_all_metrics(
-                        y_test, y_test_pred_corr, y_test_pred_raw
-                    )
+                    test_metrics = _compute_test_metrics(full_pipeline, X_test, y_test)
                     for k, v in test_metrics.items():
                         exp_result[f"{target_name}_test_{k}"] = v
 
@@ -417,7 +458,7 @@ class ExperimentMatrix:
                             f" (workers={repeat_workers}, backend=loky) ..."
                         )
                     repeat_metrics = Parallel(n_jobs=repeat_workers, backend="loky")(
-                        delayed(_run_single_stability_repeat)(i, **_repeat_kwargs)
+                        delayed(_run_single_stability_repeat)(i, **_repeat_kwargs, is_worker=True)
                         for i in repeat_ids
                     )
                 else:

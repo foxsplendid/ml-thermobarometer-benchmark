@@ -35,7 +35,6 @@ from .model_modules import (
     ExtraTreesModel,
     CatBoostModel,
     RandomForestModel,
-    SVRModel,
     StrictOOFStacking,
     RidgeModel,
     get_model_module,

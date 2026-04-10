@@ -212,15 +212,19 @@ def _run_single_lc_task(
     target_seed: int,
     feature_set: str,
     base_config: dict,
+    is_worker: bool = False,
 ) -> Dict[str, Any]:
     """Run one (repeat × fraction × model × target) task in an isolated worker.
 
-    Forces ``ML_FOLD_WORKERS=1`` to prevent nested process-pool conflicts when
-    dispatched from a ``task_workers > 1`` Parallel call.
+    When dispatched as a parallel worker (``is_worker=True``), forces
+    ``ML_FOLD_WORKERS=1`` to prevent nested process-pool conflicts.
+    Sequential callers must leave ``is_worker`` at its default (``False``) to
+    preserve the parent-process parallelism settings.
     """
-    import os as _os
-    _os.environ["ML_PARALLEL_WORKER"] = "1"
-    _os.environ["ML_FOLD_WORKERS"] = "1"
+    if is_worker:
+        import os as _os
+        _os.environ["ML_PARALLEL_WORKER"] = "1"
+        _os.environ["ML_FOLD_WORKERS"] = "1"
 
     pipeline_factory = create_pipeline_factory(
         data_module_name, model_name, corr_module_name, target_seed, feature_set, base_config
@@ -359,7 +363,7 @@ def run_learning_curve(
         if verbose:
             print(f"  Running in parallel (workers={task_workers}, backend=loky) ...")
         records = Parallel(n_jobs=task_workers, backend="loky")(
-            delayed(_run_single_lc_task)(**t) for t in tasks
+            delayed(_run_single_lc_task)(**t, is_worker=True) for t in tasks
         )
     else:
         records = []

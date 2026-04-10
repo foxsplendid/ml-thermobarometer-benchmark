@@ -8,7 +8,7 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from .interfaces import ModelModule
-from .runtime import get_n_jobs
+from .runtime import get_n_jobs, is_parallel_worker
 
 
 # ============================================================
@@ -34,9 +34,9 @@ def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> 
 
     # When running inside any parallel worker (fold-level, repeat-level, or
     # task-level), multiple CatBoost instances would contend for the same GPU
-    # device.  ML_PARALLEL_WORKER=1 is set by all worker entry points.
-    import os as _os
-    if get_fold_workers() > 1 or _os.environ.get("ML_PARALLEL_WORKER") == "1":
+    # device.  is_parallel_worker() checks the ML_PARALLEL_WORKER flag set by
+    # all worker entry points.
+    if get_fold_workers() > 1 or is_parallel_worker():
         return {}
 
     if get_gpu_device_count() >= 1:
@@ -212,89 +212,6 @@ class RandomForestModel(ModelModule):
 # ============================================================
 # ============================================================
 
-class SVRModel(ModelModule):
-    """Kernel-method regression that gives Stacking an inductive bias orthogonal to tree models.
-
-    Inputs must already be standardized (the Pipeline performs scaling inside
-    DataModule.fit_transform). SVR itself has no intrinsic randomness; the
-    ``random_seed`` parameter is kept only for interface uniformity and does
-    not affect the output.
-
-    Automatic scale-switching strategy:
-      n_samples <= linear_threshold : uses SVR(RBF) — O(n^2) but higher accuracy
-      n_samples >  linear_threshold : falls back to LinearSVR — O(n), avoids
-                                      memory/time blow-up on augmented datasets
-                                      (an RBF kernel matrix at ~30k samples
-                                      needs 5GB+ RAM and hours of CPU time).
-    """
-
-    # Switch to LinearSVR when n_samples exceeds this threshold
-    LINEAR_THRESHOLD: int = 5_000
-
-    def __init__(self,
-                 kernel: str = 'rbf',
-                 C: float = 10.0,
-                 epsilon: float = 0.1,
-                 gamma: str = 'scale',
-                 linear_threshold: Optional[int] = None,
-                 random_seed: int = 42,
-                 **kwargs):
-        """__init__ function."""
-        self.kernel = kernel
-        self.C = C
-        self.epsilon = epsilon
-        self.gamma = gamma
-        self.linear_threshold = linear_threshold if linear_threshold is not None \
-            else self.LINEAR_THRESHOLD
-        self.extra_kwargs = kwargs
-        self._training_time = 0.0
-
-    def fit(self,
-            X_train: np.ndarray,
-            y_train: np.ndarray,
-            sample_weights: Optional[np.ndarray] = None,
-            stratify_labels: Optional[np.ndarray] = None) -> Any:
-        """fit function."""
-        start_time = time.time()
-
-        if X_train.shape[0] > self.linear_threshold:
-            # Large dataset: LinearSVR, O(n) complexity
-            from sklearn.svm import LinearSVR
-            model = LinearSVR(
-                C=self.C,
-                epsilon=self.epsilon,
-                max_iter=10000,
-                **{k: v for k, v in self.extra_kwargs.items()
-                   if k not in ('gamma',)}  # LinearSVR does not accept gamma
-            )
-        else:
-            # Small dataset: RBF-SVR, preserves kernel-method inductive bias
-            from sklearn.svm import SVR
-            model = SVR(
-                kernel=self.kernel,
-                C=self.C,
-                epsilon=self.epsilon,
-                gamma=self.gamma,
-                **self.extra_kwargs,
-            )
-
-        model.fit(X_train, y_train, sample_weight=sample_weights)
-        self._training_time = time.time() - start_time
-        return model
-
-    def predict(self, model: Any, X: np.ndarray) -> np.ndarray:
-        """predict function."""
-        return model.predict(X)
-
-    def get_feature_importance(self, model: Any) -> np.ndarray:
-        """get_feature_importance function."""
-        # SVR/LinearSVR has no tree structure; return an empty array
-        return np.array([])
-
-
-# ============================================================
-# ============================================================
-
 # Registry mapping model keys to constructors; consumed by StrictOOFStacking
 # to build base learners dynamically.
 def _build_base_model_registry(random_seed: int) -> Dict[str, Any]:
@@ -303,7 +220,6 @@ def _build_base_model_registry(random_seed: int) -> Dict[str, Any]:
         'ert':      lambda p: ExtraTreesModel(random_seed=random_seed, **p),
         'catboost': lambda p: CatBoostModel(random_seed=random_seed, **p),
         'rf':       lambda p: RandomForestModel(random_seed=random_seed, **p),
-        'svr':      lambda p: SVRModel(random_seed=random_seed, **p),
         'ridge':    lambda p: RidgeModel(**p),
     }
 
@@ -526,7 +442,6 @@ def get_model_module(name: str, **kwargs) -> ModelModule:
         'cb': CatBoostModel,
         'rf': RandomForestModel,
         'randomforest': RandomForestModel,
-        'svr': SVRModel,
         'stacking': StrictOOFStacking,
     }
     

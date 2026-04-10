@@ -118,7 +118,10 @@ def get_effective_n_splits(
 ) -> int:
     """Clamp ``requested`` to the largest feasible fold count given the bin sizes."""
     if n_samples <= 1:
-        return 2
+        raise ValueError(
+            f"Cannot perform cross-validation: n_samples={n_samples}. "
+            "At least 2 samples are required."
+        )
     if labels is None:
         return max(2, min(requested, n_samples))
     _, bin_counts = np.unique(labels, return_counts=True)
@@ -220,6 +223,14 @@ class Pipeline:
         """get_model function."""
         return self._model
 
+    def get_data_state(self) -> Any:
+        """Return the fitted data-module state (scaler, feature names, etc.)."""
+        return self._state
+
+    def get_corr_model(self) -> Any:
+        """Return the fitted correction model."""
+        return self._corr_model
+
     def get_correction_params(self) -> Dict[str, float]:
         """get_correction_params function."""
         return self.corr_module.get_correction_params(self._corr_model)
@@ -263,7 +274,7 @@ def _run_single_fold(
     fold_seed = random_seed + fold_idx
     pipeline.fit(X_train, y_train, stratify_labels=stratify_train, fold_seed=fold_seed)
 
-    X_val_scaled, _ = pipeline.data_module.transform(X_val, pipeline._state)
+    X_val_scaled, _ = pipeline.data_module.transform(X_val, pipeline.get_data_state())
     y_pred_raw = pipeline.predict(X_val_scaled, apply_correction=False)
 
     return {
@@ -364,6 +375,8 @@ class StratifiedCVProtocol:
             from ..correction_modules import NoCorrection
             corr_module = NoCorrection()
 
+        # Global corrector: fitted on all OOF predictions; returned to the caller
+        # for use when fitting the final full-dataset pipeline.
         corr_model = corr_module.fit(y, oof_pred_raw)
 
         fold_metrics = []
@@ -374,12 +387,19 @@ class StratifiedCVProtocol:
             print("  Running MC uncertainty across folds...")
 
         for record in fold_records:
-            y_pred_corr = corr_module.apply(corr_model, record["y_pred_raw"])
+            # Leave-one-fold-out corrector: exclude this fold's validation
+            # indices so the per-fold metrics are free of secondary leakage.
+            other_mask = np.ones(len(y), dtype=bool)
+            other_mask[record["val_idx"]] = False
+            corr_model_fold = corr_module.fit(
+                y[other_mask], oof_pred_raw[other_mask]
+            )
+            y_pred_corr = corr_module.apply(corr_model_fold, record["y_pred_raw"])
             dist = None
 
             if uncertainty_module is not None:
                 pipeline = record["pipeline"]
-                pipeline.set_correction(corr_module, corr_model)
+                pipeline.set_correction(corr_module, corr_model_fold)
 
                 dist = uncertainty_module.predict_distribution(
                     pipeline, record["X_val"], fold_idx=record["fold_id"]

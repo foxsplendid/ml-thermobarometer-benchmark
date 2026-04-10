@@ -58,8 +58,6 @@ ml-thermobarometer-benchmark/
 ├── config.py
 ├── requirements.txt
 ├── README.md
-├── CHANGELOG.md
-├── REPRODUCIBILITY.md
 ├── src/
 │   ├── interfaces.py
 │   ├── data_modules.py
@@ -94,9 +92,48 @@ ml-thermobarometer-benchmark/
 pip install -r requirements.txt
 ```
 
-## 2. Quick Start
+Python 3.9+ is required. A CUDA-capable GPU is optional but will accelerate CatBoost experiments.
 
-### 2.1 Installation Check
+## 2. Environment Variables
+
+The training pipeline is controlled by three environment variables so you can tune parallelism without changing code:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ML_N_JOBS` | `4` | Threads per sklearn model (ExtraTrees, RF) |
+| `ML_FOLD_WORKERS` | `max(1, cpu_count / ML_N_JOBS)` auto-detected | Concurrent folds in `StratifiedCVProtocol` |
+| `ML_FOLD_BACKEND` | `loky` | joblib backend when `ML_FOLD_WORKERS > 1` |
+
+### Recommended settings by machine type
+
+| Machine | `ML_N_JOBS` | `ML_FOLD_WORKERS` | Notes |
+|---|---|---|---|
+| Laptop (4–8 cores) | `2` | `2` | Keep thermal headroom |
+| Workstation (16 cores) | `4` | `4` | 4×4 = 16 threads |
+| Server (32 cores) | `4` | `8` | 4×8 = 32 threads |
+| Any machine | `-1` | `1` | All cores for one fold — only efficient if `n_estimators` is large |
+
+> **Note**: avoid `ML_N_JOBS=-1` on high-core-count machines (≥ 16 cores). sklearn's loky
+> worker pool spawns one process per core; for 200 trees on 32 cores each process trains only
+> 6 trees, and the inter-process overhead dominates. A moderate `ML_N_JOBS=4` combined with
+> `ML_FOLD_WORKERS` is almost always faster and gives higher apparent utilization.
+
+Example — 32-core server:
+
+```bash
+set ML_N_JOBS=4
+set ML_FOLD_WORKERS=8
+python main.py
+```
+
+> `ML_FOLD_BACKEND` defaults to `loky` (isolated processes per fold). Do
+> **not** set it to `threading` when CatBoost experiments are present —
+> CatBoost uses process-level thread-local state that causes crashes under
+> thread-based fold parallelism.
+
+## 3. Quick Start
+
+### 3.1 Installation Check
 ```python
 from src import (
     RawDataModule, BalancedDataModule, AugmentedDataModule,
@@ -107,19 +144,24 @@ from src import (
 print('OK')
 ```
 
-### 2.2 Quick Test
+### 3.2 Quick Test
 ```bash
 python main.py --test
 ```
 
-### 2.3 Main Benchmark (24 experiments)
+Runs 4 experiments × 2 folds on both feature sets and prints a summary table.
+Expected output: non-NaN RMSE and R² values in the summary.
+
+### 3.3 Main Benchmark (24 experiments)
 ```bash
 python main.py
 ```
 
-## 3. Sub-Experiment Scripts
+Runs all 24 experiments (12 module combinations × 2 feature sets) with 10-fold CV.
 
-### 3.1 Stability Analysis
+## 4. Sub-Experiment Scripts
+
+### 4.1 Stability Analysis
 ```bash
 python tools/run_stability.py --exp-id E07_stability_nj4 --model-module ert --data-module augmented --corr-module none --feature-set Liquid --n-repeats 1000
 ```
@@ -129,7 +171,7 @@ Merge segmented runs:
 python tools/run_stability.py --merge-dir results --exp-id E07_stability_nj4 --output-dir results
 ```
 
-### 3.2 Learning-Curve Analysis
+### 4.2 Learning-Curve Analysis
 ```bash
 python tools/run_learning_curve.py --feature-set liq --models ert stacking --repeats 30 --n-splits 10
 ```
@@ -139,12 +181,12 @@ Merge segmented runs:
 python tools/run_learning_curve.py --merge-dir results/learning_curve --output-dir results/learning_curve
 ```
 
-### 3.3 Analysis Error Propagation
+### 4.3 Error Propagation
 ```bash
 python tools/run_error_propagation.py --exp-id E07_ert_augmented_none_liq --model-module ert --data-module augmented --corr-module none --feature-set Liquid --n-mc 1000
 ```
 
-### 3.4 Offline Plotting 
+### 4.4 Offline Plotting
 ```bash
 python tools/plot_offline_figures.py --selected-only
 ```
@@ -153,17 +195,36 @@ Notes:
 - This script only reads existing artifacts under `results/` and does not retrain models.
 - SHAP runs by default in the offline plotting flow with internal defaults: `max_samples=300`, `bg_k=50`, `force=True`.
 
-## 4. Key Outputs
+## 5. Key Outputs
 
 - `results/metrics_summary.csv`: main benchmark summary.
 - `results/effect_table.csv`: effect table relative to baseline.
+- `results/config_used.yaml`: exact hyperparameters, data shape, git commit, and library versions.
 - `results/models/*.joblib`: serialized model artifacts.
 - `results/stability/`: stability-repeat outputs.
 - `results/learning_curve/`: learning-curve outputs.
 - `results/error_propagation/`: error-propagation outputs.
 - `results/figures/`: offline plotting outputs.
 
-## 5. Module API Index
+## 6. Seeding Strategy
+
+- Base seed: `config.py → CVConfig.random_seed = 42`
+- T target seed: `base_seed` (42)
+- P target seed: `base_seed + P_SEED_OFFSET` (42 + 1000 = 1042)
+- Per-fold seed: `target_seed + fold_idx` (0-indexed)
+- Stability per-repeat seed: `target_seed_base + repeat_id`
+- MC per-repeat seed: passed explicitly to `MCUncertaintyEstimator`
+
+These offsets are large enough to avoid seed overlap across all expected run configurations.
+
+## 7. Verifying Results
+
+After `python main.py`, load `results/metrics_summary.csv` and compare the
+`T_rmse_mean` and `P_rmse_mean` columns against Table X in the paper.
+Numeric results may differ slightly across OS/library versions due to floating-point
+non-determinism in BLAS; differences beyond ±0.5 % warrant investigation.
+
+## 8. Module API Index
 
 - Data modules: `src/data_modules.py`
 - Model modules: `src/model_modules.py`
@@ -174,9 +235,5 @@ Notes:
 - Visualization: `src/viz.py`
 - Runtime / resource detection: `src/runtime.py`
 - Shared utilities (perturbation, splitters, experiment params, logging): `src/utils.py`
-
-See `REPRODUCIBILITY.md` for the seed strategy, resource model, and the
-full end-to-end reproduction recipe. See `CHANGELOG.md` for the version
-history.
 
 ---

@@ -28,7 +28,7 @@ class TestPipeline:
 
         X_val_scaled, _ = pipeline.data_module.transform(
             train_val_split['X_val'],
-            pipeline._state
+            pipeline.get_data_state()
         )
         y_pred = pipeline.predict(X_val_scaled)
 
