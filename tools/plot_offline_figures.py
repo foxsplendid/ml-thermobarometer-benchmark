@@ -10,7 +10,6 @@ import logging
 import os
 import sys
 from typing import Any, Dict, List, Optional
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -20,14 +19,14 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from sklearn.model_selection import StratifiedKFold
 
-# Ensure repo root is on sys.path
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+# Bootstrap sys.path so tools/_common.py can find the repo root.
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
 
+from tools._common import init_tool_logging
 from config import get_config_dict
-from src.protocol import _merge_sparse_bins
-from src.logger import setup_logging, get_logger
+from src.protocol import merge_sparse_bins
 from src.viz import (
     plot_pred_vs_true,
     plot_residuals,
@@ -954,7 +953,7 @@ def _plot_learning_curve(learning_curve_dir: str, fig_dir: str) -> None:
 def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> None:
     """Figure 3-2: P-T grid stratified CV diagram."""
     try:
-        from src.splitters import compute_pt_edges, assign_pt_bins
+        from src.utils import compute_pt_edges, assign_pt_bins
 
         # Load data.
         df = pd.read_csv(data_path, encoding='latin-1')
@@ -967,7 +966,7 @@ def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Non
 
         # Merge sparse bins to make stratified CV feasible.
         n_splits = 10
-        merged_labels = _merge_sparse_bins(tp_labels, min_samples_per_bin=n_splits)
+        merged_labels = merge_sparse_bins(tp_labels, min_samples_per_bin=n_splits)
 
         # Check the minimum bin count and downgrade n_splits if needed.
         _, bin_counts = np.unique(merged_labels, return_counts=True)
@@ -1075,14 +1074,7 @@ def main() -> int:
     print(f"plots saved under {fig_dir}")
     return 0
 if __name__ == "__main__":
-    def _init_logging():
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_filename = f"plot_offline_figures_{timestamp}_{os.getpid()}.log"
-        setup_logging(log_filename=log_filename)
-        global logger
-        logger = get_logger(__name__)
-
-    _init_logging()
+    logger = init_tool_logging("plot_offline_figures")
     try:
         exit_code = main()
     except Exception:

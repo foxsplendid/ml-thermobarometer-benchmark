@@ -3,7 +3,8 @@
 
 import pytest
 import numpy as np
-from src.protocol import Pipeline, StratifiedCVProtocol, compute_all_metrics
+from src.protocol import Pipeline, StratifiedCVProtocol
+from src.metrics import compute_all_metrics
 from src.data_modules import RawDataModule
 from src.model_modules import ExtraTreesModel
 from src.correction_modules import NoCorrection

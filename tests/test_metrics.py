@@ -4,10 +4,9 @@
 import pytest
 import numpy as np
 from src.metrics import (
-    rmse, mae, r2, mape, bias,
+    rmse, mae, r2, bias,
     compute_slope_intercept,
     compute_bias_stats,
-    compute_metrics,
     summarize_folds
 )
 
@@ -119,31 +118,6 @@ class TestBiasStats:
         stats = compute_bias_stats(y_true, y_pred)
 
         assert np.isclose(stats['bias_mean'], 0.0, atol=1e-10)
-
-
-class TestComputeMetrics:
-    """TestComputeMetrics class."""
-
-    def test_returns_all_metrics(self):
-        """test_returns_all_metrics function."""
-        y_true = np.random.randn(100)
-        y_pred = y_true + np.random.randn(100) * 0.1
-
-        metrics = compute_metrics(y_true, y_pred)
-
-        expected_keys = ['rmse', 'mae', 'r2', 'slope', 'intercept', 'bias_mean', 'resid_std']
-        for key in expected_keys:
-            assert key in metrics
-
-    def test_with_prefix(self):
-        """test_with_prefix function."""
-        y_true = np.random.randn(100)
-        y_pred = y_true + np.random.randn(100) * 0.1
-
-        metrics = compute_metrics(y_true, y_pred, prefix='T_')
-
-        assert 'T_rmse' in metrics
-        assert 'T_r2' in metrics
 
 
 class TestSummarizeFolds:

@@ -21,8 +21,8 @@ if PROJECT_ROOT not in sys.path:
 # ============================================================
 # ============================================================
 from config import get_config_dict
-from src.experiment_params import build_model_params, build_data_params
-from src.logger import setup_logging, get_logger
+from src.utils import build_model_params, build_data_params, setup_logging, get_logger
+from src.runtime import log_runtime_info
 
 CONFIG = get_config_dict()
 
@@ -70,7 +70,7 @@ def get_experiment_configs():
                 model_module_name=base['model'],
                 corr_module_name=base['corr'],
                 feature_set=fset,
-                # random_seed omitted: protocol._apply_seed injects per-target seed at runtime
+                # random_seed omitted: apply_seed() injects the per-target seed at runtime
                 data_params=build_data_params(CONFIG, base['data'], fset),
                 model_params=build_model_params(CONFIG, base['model']),
                 run_uncertainty=False,
@@ -117,7 +117,7 @@ def load_data(config, feature_set='Liquid'):
 
 def prepare_splits(X, y_T, y_P, config):
     """prepare_splits function."""
-    from src.splitters import compute_pt_edges, assign_pt_bins, select_test_indices
+    from src.utils import compute_pt_edges, assign_pt_bins, select_test_indices
 
     print("\nPreparing test split (P-T grid sampling)...")
 
@@ -332,7 +332,9 @@ def _init_logging():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_filename = f"main_{timestamp}_{os.getpid()}.log"
     setup_logging(log_filename=log_filename)
-    return get_logger(__name__)
+    log = get_logger(__name__)
+    log_runtime_info()
+    return log
 
 
 if __name__ == '__main__':

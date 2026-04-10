@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Model-module implementations for baseline and ensemble regressors."""
 
-import os
 import time
 import numpy as np
 from typing import Any, Dict, List, Optional
@@ -9,30 +8,21 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from .interfaces import ModelModule
+from .runtime import get_n_jobs
 
 
 # ============================================================
 # ============================================================
 
 def _get_default_n_jobs() -> int:
-    """Return the default n_jobs for sklearn parallel estimators.
-
-    读取环境变量 ``ML_N_JOBS``（整数）以允许外部并行脚本精确控制每个模型
-    占用的线程数，避免多实验并发时线程过度竞争。
-    未设置时默认 -1（使用全部逻辑核心）。
-    """
-    env_val = os.environ.get('ML_N_JOBS')
-    if env_val is not None:
-        try:
-            return int(env_val)
-        except ValueError:
-            pass
-    return -1  # 使用全部可用核心（移除原 Windows 限制）
+    """Delegate to :func:`src.runtime.get_n_jobs`."""
+    return get_n_jobs()
 
 
 def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> Dict[str, Any]:
     """_get_catboost_task_type function."""
     from catboost.utils import get_gpu_device_count
+    from .runtime import get_fold_workers
 
     task_type_upper = task_type.upper().strip()
 
@@ -41,6 +31,13 @@ def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> 
 
     if task_type_upper == 'GPU':
         return {'task_type': 'GPU', 'devices': gpu_devices}
+
+    # When running inside any parallel worker (fold-level, repeat-level, or
+    # task-level), multiple CatBoost instances would contend for the same GPU
+    # device.  ML_PARALLEL_WORKER=1 is set by all worker entry points.
+    import os as _os
+    if get_fold_workers() > 1 or _os.environ.get("ML_PARALLEL_WORKER") == "1":
+        return {}
 
     if get_gpu_device_count() >= 1:
         return {'task_type': 'GPU', 'devices': gpu_devices}
@@ -73,19 +70,23 @@ class ExtraTreesModel(ModelModule):
         }
         self._training_time = 0.0
     
-    def fit(self, 
-            X_train: np.ndarray, 
+    def fit(self,
+            X_train: np.ndarray,
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
         """fit function."""
+        import joblib
         from sklearn.ensemble import ExtraTreesRegressor
-        
+
         start_time = time.time()
-        
-        model = ExtraTreesRegressor(**self.params)
-        model.fit(X_train, y_train, sample_weight=sample_weights)
-        
+
+        # Use threading backend to avoid loky process-spawn overhead on
+        # high-core-count machines (tree ensembles release the GIL).
+        with joblib.parallel_backend('threading'):
+            model = ExtraTreesRegressor(**self.params)
+            model.fit(X_train, y_train, sample_weight=sample_weights)
+
         self._training_time = time.time() - start_time
         return model
     
@@ -181,19 +182,21 @@ class RandomForestModel(ModelModule):
         }
         self._training_time = 0.0
     
-    def fit(self, 
-            X_train: np.ndarray, 
+    def fit(self,
+            X_train: np.ndarray,
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
         """fit function."""
+        import joblib
         from sklearn.ensemble import RandomForestRegressor
-        
+
         start_time = time.time()
-        
-        model = RandomForestRegressor(**self.params)
-        model.fit(X_train, y_train, sample_weight=sample_weights)
-        
+
+        with joblib.parallel_backend('threading'):
+            model = RandomForestRegressor(**self.params)
+            model.fit(X_train, y_train, sample_weight=sample_weights)
+
         self._training_time = time.time() - start_time
         return model
     
@@ -210,19 +213,22 @@ class RandomForestModel(ModelModule):
 # ============================================================
 
 class SVRModel(ModelModule):
-    """SVRModel — 核方法回归，为 Stacking 提供与树模型正交的归纳偏置。
+    """Kernel-method regression that gives Stacking an inductive bias orthogonal to tree models.
 
-    输入应已标准化（Pipeline 通过 DataModule 在 fit_transform 中完成缩放）。
-    SVR 本身无随机性，random_seed 参数仅为保持接口统一，不影响输出。
+    Inputs must already be standardized (the Pipeline performs scaling inside
+    DataModule.fit_transform). SVR itself has no intrinsic randomness; the
+    ``random_seed`` parameter is kept only for interface uniformity and does
+    not affect the output.
 
-    自动规模切换策略：
-      n_samples <= linear_threshold : 使用 SVR(RBF)，O(n²) 但核方法精度高
-      n_samples >  linear_threshold : 自动切换到 LinearSVR，O(n)，避免增强
-                                       数据集上的内存/时间爆炸（~30k 样本时
-                                       RBF 核矩阵需 5GB+ 内存，耗时数小时）
+    Automatic scale-switching strategy:
+      n_samples <= linear_threshold : uses SVR(RBF) — O(n^2) but higher accuracy
+      n_samples >  linear_threshold : falls back to LinearSVR — O(n), avoids
+                                      memory/time blow-up on augmented datasets
+                                      (an RBF kernel matrix at ~30k samples
+                                      needs 5GB+ RAM and hours of CPU time).
     """
 
-    # 样本数超过此阈值时自动切换 LinearSVR
+    # Switch to LinearSVR when n_samples exceeds this threshold
     LINEAR_THRESHOLD: int = 5_000
 
     def __init__(self,
@@ -252,17 +258,17 @@ class SVRModel(ModelModule):
         start_time = time.time()
 
         if X_train.shape[0] > self.linear_threshold:
-            # 大数据集：LinearSVR，O(n) 复杂度
+            # Large dataset: LinearSVR, O(n) complexity
             from sklearn.svm import LinearSVR
             model = LinearSVR(
                 C=self.C,
                 epsilon=self.epsilon,
                 max_iter=10000,
                 **{k: v for k, v in self.extra_kwargs.items()
-                   if k not in ('gamma',)}  # LinearSVR 不接受 gamma
+                   if k not in ('gamma',)}  # LinearSVR does not accept gamma
             )
         else:
-            # 小数据集：RBF-SVR，保留核方法归纳偏置
+            # Small dataset: RBF-SVR, preserves kernel-method inductive bias
             from sklearn.svm import SVR
             model = SVR(
                 kernel=self.kernel,
@@ -282,14 +288,15 @@ class SVRModel(ModelModule):
 
     def get_feature_importance(self, model: Any) -> np.ndarray:
         """get_feature_importance function."""
-        # SVR/LinearSVR 无树结构，返回空数组
+        # SVR/LinearSVR has no tree structure; return an empty array
         return np.array([])
 
 
 # ============================================================
 # ============================================================
 
-# 模型键到构造器的注册表，供 StrictOOFStacking 动态构建基学习器使用
+# Registry mapping model keys to constructors; consumed by StrictOOFStacking
+# to build base learners dynamically.
 def _build_base_model_registry(random_seed: int) -> Dict[str, Any]:
     """_build_base_model_registry function."""
     return {

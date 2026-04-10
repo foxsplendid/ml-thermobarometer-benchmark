@@ -1,39 +1,36 @@
 # -*- coding: utf-8 -*-
+"""Run Monte Carlo error-propagation analysis for any experiment."""
+
 import argparse
 import json
 import logging
 import os
 import sys
 import time
-from datetime import datetime
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
-# Ensure repo root is on sys.path
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+# Bootstrap sys.path so tools/_common.py can find the repo root.
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
 
-from config import get_config_dict
+from tools._common import BASE_CONFIG, add_common_args, build_experiment_config, init_tool_logging
 from main import load_data, prepare_splits
 from src.data_modules import get_data_module
 from src.model_modules import get_model_module
 from src.correction_modules import get_correction_module
-from src.experiment_params import build_data_params, build_model_params
 from src.protocol import (
     ExperimentConfig,
     Pipeline,
-    _derive_target_seed,
+    derive_target_seed,
 )
 from src.metrics import compute_all_metrics
 from src.uncertainty_modules import MCUncertaintyEstimator
-from src.logger import setup_logging, get_logger
 
 logger = logging.getLogger(__name__)
-
-BASE_CONFIG = get_config_dict()
 
 OUTPUT_SUBDIR = "error_propagation"
 
@@ -67,32 +64,6 @@ def _load_main_experiment_test_rmse(output_dir: str, exp_id: str, target: str) -
         logger.warning(f"Failed to read main-experiment test_RMSE: {e}")
         return None
 
-
-def _build_config(
-    exp_id: str,
-    data_module: str,
-    model_module: str,
-    corr_module: str,
-    feature_set: str,
-    random_seed: int,
-) -> ExperimentConfig:
-    """_build_config function."""
-    model_params = build_model_params(BASE_CONFIG, model_module, random_seed)
-    data_params = build_data_params(BASE_CONFIG, data_module, feature_set, random_seed)
-
-    return ExperimentConfig(
-        exp_id=exp_id,
-        data_module_name=data_module,
-        model_module_name=model_module,
-        corr_module_name=corr_module,
-        feature_set=feature_set,
-        data_params=data_params,
-        model_params=model_params,
-    )
-
-
-def _ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
 
 
 def _save_json(path: str, payload: Dict) -> None:
@@ -170,7 +141,7 @@ def _run_error_propagation(
     y_P_mc = y_P_test[sample_idx]
 
     ep_dir = os.path.join(output_dir, OUTPUT_SUBDIR)
-    _ensure_dir(ep_dir)
+    os.makedirs(ep_dir, exist_ok=True)
 
     from config import DataConfig
     data_config = DataConfig()
@@ -188,7 +159,7 @@ def _run_error_propagation(
     if len(feature_names) != X_test.shape[1]:
         raise ValueError(f"feature_names length must match feature dimension, len={len(feature_names)} n_features={X_test.shape[1]}")
 
-    from src.perturbation import get_rel_err_vector
+    from src.utils import get_rel_err_vector
     rel_err_vec = get_rel_err_vector(feature_names, strict=True)
 
     meta = {
@@ -230,8 +201,8 @@ def _run_error_propagation(
     _save_json(os.path.join(ep_dir, f"{config.exp_id}_ep_meta.json"), meta)
 
     def run_target(tag: str, y_true_mc: np.ndarray, y_train: np.ndarray) -> None:
-        target_seed = _derive_target_seed(random_seed, tag)
-        mc_seed_target = _derive_target_seed(mc_seed, tag)
+        target_seed = derive_target_seed(random_seed, tag)
+        mc_seed_target = derive_target_seed(mc_seed, tag)
 
         data_params = dict(config.data_params)
         model_params = dict(config.model_params)
@@ -401,7 +372,7 @@ Output:
     else:
         exp_id = args.exp_id
 
-    config = _build_config(
+    config = build_experiment_config(
         exp_id=exp_id,
         data_module=args.data_module,
         model_module=args.model_module,
@@ -440,7 +411,7 @@ Output:
     y_T_test = y_T[test_idx]
     y_P_test = y_P[test_idx]
 
-    _ensure_dir(args.output_dir)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     start = time.time()
     _run_error_propagation(
@@ -461,14 +432,7 @@ Output:
 
 
 if __name__ == "__main__":
-    def _init_logging():
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_filename = f"error_propagation_{timestamp}_{os.getpid()}.log"
-        setup_logging(log_filename=log_filename)
-        global logger
-        logger = get_logger(__name__)
-
-    _init_logging()
+    logger = init_tool_logging("error_propagation")
     try:
         exit_code = main()
     except Exception:

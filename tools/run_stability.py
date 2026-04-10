@@ -1,52 +1,28 @@
 # -*- coding: utf-8 -*-
+"""Run stability repeats (bootstrapped train/test splits) for any experiment."""
+
 import argparse
 import glob
 import logging
 import os
 import sys
 import time
-from datetime import datetime
-from typing import Dict, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-# Ensure repo root is on sys.path
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+# Bootstrap sys.path so tools/_common.py can find the repo root.
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
 
-from config import get_config_dict
+from tools._common import BASE_CONFIG, add_common_args, build_experiment_config, init_tool_logging
 from main import load_data, prepare_splits
-from src.experiment_params import build_data_params, build_model_params
 from src.metrics import summarize_folds
 from src.protocol import ExperimentConfig, ExperimentMatrix
-from src.logger import setup_logging, get_logger
 
-BASE_CONFIG = get_config_dict()
 logger = logging.getLogger(__name__)
-
-def _build_config(
-    exp_id: str,
-    data_module: str,
-    model_module: str,
-    corr_module: str,
-    feature_set: str,
-    random_seed: int,
-) -> ExperimentConfig:
-    """_build_config function."""
-    model_params = build_model_params(BASE_CONFIG, model_module, random_seed)
-    data_params = build_data_params(BASE_CONFIG, data_module, feature_set, random_seed)
-
-    return ExperimentConfig(
-        exp_id=exp_id,
-        data_module_name=data_module,
-        model_module_name=model_module,
-        corr_module_name=corr_module,
-        feature_set=feature_set,
-        data_params=data_params,
-        model_params=model_params,
-    )
 
 
 def _ensure_dir(path: str) -> None:
@@ -115,9 +91,8 @@ def _run_stability(config: ExperimentConfig,
                    segment_tag: Optional[str],
                    write_summary: bool,
                    test_size: float,
-                   checkpoint_interval: int,
                    random_seed: int,
-                   resume: bool) -> None:
+                   repeat_workers: int = 1) -> None:
     matrix = ExperimentMatrix(
         X=X_train,
         y_T=y_T_train,
@@ -137,10 +112,9 @@ def _run_stability(config: ExperimentConfig,
         repeat_end=repeat_end,
         segment_tag=segment_tag,
         write_summary=write_summary,
-        checkpoint_interval=checkpoint_interval,
         random_seed=random_seed,
-        resume=resume,
         verbose=True,
+        repeat_workers=repeat_workers,
     )
 
 
@@ -160,25 +134,8 @@ Examples:
   python tools/run_stability.py --model-module stacking --corr-module segmented
 """
     )
-    parser.add_argument("--exp-id", default="stability_test", help="Experiment ID (output filename prefix)")
-    parser.add_argument("--data-module", default="augmented", 
-                        choices=["raw", "balanced", "augmented"],
-                        help="Data module")
-    parser.add_argument("--model-module", default="ert",
-                        choices=["ert", "extratrees", "catboost", "rf", "randomforest", "stacking"],
-                        help="Model module")
-    parser.add_argument("--corr-module", default="none",
-                        choices=["none", "segmented"],
-                        help="Correction module")
-    parser.add_argument("--feature-set", default="Liquid",
-                        choices=["NoLiquid", "Liquid"],
-                        help="Feature set")
-    
-    parser.add_argument("--data-path", default=BASE_CONFIG["data_path"])
-    parser.add_argument("--output-dir", default=BASE_CONFIG["output_dir"])
-    parser.add_argument("--n-splits", type=int, default=BASE_CONFIG["n_splits"])
-    parser.add_argument("--random-seed", type=int, default=BASE_CONFIG["random_seed"],
-                        help="base seed for repeats (base + repeat_id)")
+    add_common_args(parser)
+    parser.set_defaults(exp_id="stability_test")
     
     parser.add_argument("--n-repeats", type=int, default=1000,
                         help="Number of repeats (default: 1000)")
@@ -190,15 +147,22 @@ Examples:
                         help="merge segments and finalize summary")
     parser.add_argument("--stability-test-size", type=float, default=0.3,
                         help="stability test size (default: 0.3)")
-    parser.add_argument("--checkpoint-interval", type=int, default=20,
-                        help="checkpoint interval in repeats (default: 20)")
-    parser.add_argument("--resume", action="store_true",
-                        help="resume from latest checkpoint/test_metrics")
+    parser.add_argument("--repeat-workers", type=int, default=None,
+                        help="parallel repeat workers (default: auto = max(1, cpu_count // n_jobs));"
+                             " set to 1 to force sequential")
 
-    # skip options
-    parser.add_argument("--skip-stability", action="store_true", help="skip stability test")
 
     args = parser.parse_args()
+
+    # Auto-detect repeat_workers: same formula as fold_workers (cpu_count // n_jobs)
+    if args.repeat_workers is None:
+        from src.runtime import get_n_jobs
+        cpu_count = os.cpu_count() or 1
+        n_jobs = get_n_jobs()
+        n_per_worker = n_jobs if n_jobs > 0 else cpu_count
+        repeat_workers = max(1, cpu_count // n_per_worker)
+    else:
+        repeat_workers = max(1, args.repeat_workers)
 
     if (args.repeat_start is None) ^ (args.repeat_end is None):
         raise ValueError("repeat-start and repeat-end must be provided together")
@@ -215,7 +179,7 @@ Examples:
 
     segment_tag = f"rep_{repeat_start:03d}_{repeat_end:03d}" if segmented else None
 
-    config = _build_config(
+    config = build_experiment_config(
         exp_id=args.exp_id,
         data_module=args.data_module,
         model_module=args.model_module,
@@ -265,27 +229,27 @@ Examples:
 
     start = time.time()
     
-    if not args.skip_stability:
-        if segmented:
-            print(f"\nRunning stability segment: {repeat_start}-{repeat_end}")
-        else:
-            print(f"\nRunning stability repeats: {args.n_repeats}")
-        _run_stability(
-            config,
-            X_train, y_T_train, y_P_train, tp_bins_train,
-            X_test, y_T_test, y_P_test,
-            args.output_dir,
-            args.n_splits,
-            args.n_repeats,
-            repeat_start,
-            repeat_end,
-            segment_tag,
-            (not segmented),
-            args.stability_test_size,
-            args.checkpoint_interval,
-            args.random_seed,
-            args.resume,
-        )
+    if segmented:
+        print(f"\nRunning stability segment: {repeat_start}-{repeat_end}"
+              f" (repeat_workers={repeat_workers})")
+    else:
+        print(f"\nRunning stability repeats: {args.n_repeats}"
+              f" (repeat_workers={repeat_workers})")
+    _run_stability(
+        config,
+        X_train, y_T_train, y_P_train, tp_bins_train,
+        X_test, y_T_test, y_P_test,
+        args.output_dir,
+        args.n_splits,
+        args.n_repeats,
+        repeat_start,
+        repeat_end,
+        segment_tag,
+        (not segmented),
+        args.stability_test_size,
+        args.random_seed,
+        repeat_workers=repeat_workers,
+    )
 
     elapsed = time.time() - start
     print(f"\nDone. Elapsed: {elapsed:.1f}s")
@@ -293,14 +257,7 @@ Examples:
 
 
 if __name__ == "__main__":
-    def _init_logging():
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_filename = f"stability_{timestamp}_{os.getpid()}.log"
-        setup_logging(log_filename=log_filename)
-        global logger
-        logger = get_logger(__name__)
-
-    _init_logging()
+    logger = init_tool_logging("stability")
     try:
         exit_code = main()
     except Exception:

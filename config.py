@@ -72,7 +72,7 @@ class ModelDefaults:
         'n_estimators': 200,
         'max_depth': 15,
         'min_samples_split': 5,
-        'n_jobs': 4,
+        'n_jobs': None,  # None → deferred to ML_N_JOBS env var (default 4 in src/runtime.py)
     })
 
     catboost: CatBoostConfig = field(default_factory=CatBoostConfig)
@@ -95,7 +95,7 @@ class ModelDefaults:
         'C': 10.0,
         'epsilon': 0.1,
         'gamma': 'scale',
-        'linear_threshold': 5000,  # 样本数超过此值时自动切换 LinearSVR
+        'linear_threshold': 5000,  # switch to LinearSVR when n_samples exceeds this threshold
     })
 
 

@@ -23,13 +23,6 @@ def r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return r2_score(y_true, y_pred)
 
 
-def mape(y_true: np.ndarray, y_pred: np.ndarray, epsilon: float = 1e-8) -> float:
-    """Compute mean absolute percentage error in percent."""
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    return np.mean(np.abs((y_true - y_pred) / (np.abs(y_true) + epsilon))) * 100
-
-
 def bias(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Compute signed bias (y_true - y_pred)."""
     return np.mean(y_true - y_pred)
@@ -56,25 +49,6 @@ def compute_bias_stats(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, floa
     return {
         "bias_mean": np.mean(residuals),
         "resid_std": np.std(residuals, ddof=1),
-    }
-
-
-def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, prefix: str = "") -> Dict[str, float]:
-    """Compute core regression metrics with an optional key prefix."""
-    y_true = np.asarray(y_true).ravel()
-    y_pred = np.asarray(y_pred).ravel()
-
-    slope, intercept = compute_slope_intercept(y_true, y_pred)
-    bias_stats = compute_bias_stats(y_true, y_pred)
-
-    return {
-        f"{prefix}rmse": rmse(y_true, y_pred),
-        f"{prefix}mae": mae(y_true, y_pred),
-        f"{prefix}r2": r2(y_true, y_pred),
-        f"{prefix}slope": slope,
-        f"{prefix}intercept": intercept,
-        f"{prefix}bias_mean": bias_stats["bias_mean"],
-        f"{prefix}resid_std": bias_stats["resid_std"],
     }
 
 

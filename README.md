@@ -20,7 +20,7 @@ This project builds and evaluates machine-learning thermobarometer models under 
 - `M3 CorrectionModule`: `none` / `segmented`
 - `M4 UncertaintyModule`: `MCUncertaintyEstimator`
 
-### 3.2 Main Experiment Matrix
+### 2.2 Main Experiment Matrix
 The main benchmark includes 24 experiments = 12 base configurations x 2 feature sets:
 
 - `E01-E03`: `raw` + (`ert`/`catboost`/`stacking`) + `none`
@@ -58,20 +58,24 @@ ml-thermobarometer-benchmark/
 ├── config.py
 ├── requirements.txt
 ├── README.md
+├── CHANGELOG.md
+├── REPRODUCIBILITY.md
 ├── src/
 │   ├── interfaces.py
 │   ├── data_modules.py
 │   ├── model_modules.py
 │   ├── correction_modules.py
 │   ├── uncertainty_modules.py
-│   ├── experiment_params.py
-│   ├── protocol.py
-│   ├── splitters.py
-│   ├── perturbation.py
 │   ├── metrics.py
 │   ├── viz.py
-│   └── logger.py
+│   ├── runtime.py
+│   ├── utils.py
+│   └── protocol/
+│       ├── __init__.py
+│       ├── pipeline.py
+│       └── matrix.py
 ├── tools/
+│   ├── _common.py
 │   ├── run_stability.py
 │   ├── run_learning_curve.py
 │   ├── run_error_propagation.py
@@ -165,19 +169,14 @@ Notes:
 - Model modules: `src/model_modules.py`
 - Correction modules: `src/correction_modules.py`
 - Uncertainty modules: `src/uncertainty_modules.py`
-- Protocol executor: `src/protocol.py`
+- Protocol executor: `src/protocol/`
 - Metrics: `src/metrics.py`
 - Visualization: `src/viz.py`
----
+- Runtime / resource detection: `src/runtime.py`
+- Shared utilities (perturbation, splitters, experiment params, logging): `src/utils.py`
 
-# Part III: Changelog 
-
-- `V1`: Initial modular experiment framework.
-- `V2`: Added dual feature sets and stratified evaluation design.
-- `V3`: Improved data-augmentation and correction strategy comparison.
-- `V4`: Stabilized the main protocol and fixed test-set workflow.
-- `V5`: Refactored the experiment matrix and figure workflow.
-- `V6`: Centralized configuration and split the toolchain.
-- `V7`: Unified main/sub-experiment workflows and improved offline plotting and error-propagation pipelines.
+See `REPRODUCIBILITY.md` for the seed strategy, resource model, and the
+full end-to-end reproduction recipe. See `CHANGELOG.md` for the version
+history.
 
 ---

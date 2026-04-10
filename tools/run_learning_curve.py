@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+"""Learning-curve tool: varies training-set size to measure data efficiency."""
 
 import argparse
 import glob
@@ -7,36 +8,35 @@ import os
 import sys
 import time
 import warnings
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 warnings.filterwarnings('ignore')
 
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+# Bootstrap sys.path so tools/_common.py can find the repo root.
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
 
-from config import get_config_dict
+from tools._common import BASE_CONFIG, init_tool_logging
 from main import load_data, prepare_splits
 from src.correction_modules import get_correction_module
 from src.data_modules import get_data_module
-from src.experiment_params import build_data_params, build_model_params
+from src.utils import build_data_params, build_model_params
 from src.model_modules import get_model_module
 from src.protocol import (
     Pipeline,
     StratifiedCVProtocol,
-    _merge_sparse_bins,
-    _get_effective_n_splits,
-    _derive_target_seed,
+    merge_sparse_bins,
+    get_effective_n_splits,
+    derive_target_seed,
 )
-from src.logger import setup_logging, get_logger
 
-BASE_CONFIG = get_config_dict()
 OUTPUT_SUBDIR = "learning_curve"
 logger = logging.getLogger(__name__)
+
 
 def summarize_runs(runs_df: pd.DataFrame, requested_n_splits: int) -> pd.DataFrame:
     summary_records = []
@@ -51,7 +51,6 @@ def summarize_runs(runs_df: pd.DataFrame, requested_n_splits: int) -> pd.DataFra
 
         rmse_mean_of_repeats = np.mean(rmse_values)
         rmse_std_of_repeats = np.std(rmse_values, ddof=1) if n_valid > 1 else np.nan
-
         r2_mean_of_repeats = np.mean(r2_values) if len(r2_values) > 0 else np.nan
         r2_std_of_repeats = np.std(r2_values, ddof=1) if len(r2_values) > 1 else np.nan
 
@@ -136,47 +135,30 @@ def merge_runs_files(merge_dir: str) -> pd.DataFrame:
 
 
 # ============================================================
+# Per-task helpers
 # ============================================================
-
-
-def get_effective_n_splits(n_samples: int, strat_labels: np.ndarray, requested_n_splits: int) -> int:
-    """get_effective_n_splits function."""
-    return _get_effective_n_splits(strat_labels, requested_n_splits, n_samples)
-
-
-def merge_sparse_bins(strat_labels: np.ndarray, min_samples_per_bin: int = 10) -> np.ndarray:
-    """merge_sparse_bins function."""
-    return _merge_sparse_bins(strat_labels, min_samples_per_bin)
-
 
 def run_cv_for_subsample(
     X_sub: np.ndarray,
     y_sub: np.ndarray,
     strat_labels_sub: np.ndarray,
-    pipeline_factory: Callable[..., Pipeline],
+    pipeline_factory,
     corr_module,
     n_splits: int,
     random_seed: int,
 ) -> Dict[str, Any]:
-    """run_cv_for_subsample function."""
     n_bins_raw = len(np.unique(strat_labels_sub)) if strat_labels_sub is not None else 0
-
     merged_labels = merge_sparse_bins(strat_labels_sub, min_samples_per_bin=n_splits)
     n_bins_merged = len(np.unique(merged_labels)) if merged_labels is not None else 0
     bins_merged = int(n_bins_raw > 0 and n_bins_merged < n_bins_raw)
-
-    effective_n_splits = get_effective_n_splits(len(X_sub), merged_labels, n_splits)
-
+    effective_n_splits = get_effective_n_splits(merged_labels, n_splits, len(X_sub))
     protocol = StratifiedCVProtocol(n_splits=effective_n_splits, random_seed=random_seed)
 
     try:
         results = protocol.run(
-            X_sub, y_sub,
-            pipeline_factory,
-            uncertainty_module=None,
-            corr_module=corr_module,
-            stratify_labels=merged_labels,
-            verbose=False
+            X_sub, y_sub, pipeline_factory,
+            uncertainty_module=None, corr_module=corr_module,
+            stratify_labels=merged_labels, verbose=False,
         )
         summary = results['summary']
         n_splits_used = effective_n_splits
@@ -203,7 +185,6 @@ def create_pipeline_factory(
     feature_set: str,
     base_config: dict,
 ):
-    """create_pipeline_factory function."""
     def factory(seed: Optional[int] = None):
         seed_value = base_seed if seed is None else seed
         data_params = build_data_params(base_config, data_module_name, feature_set, seed_value)
@@ -215,29 +196,85 @@ def create_pipeline_factory(
     return factory
 
 
+def _run_single_lc_task(
+    repeat_id: int,
+    fraction: float,
+    model_name: str,
+    target_name: str,
+    X_sub: np.ndarray,
+    y_sub: np.ndarray,
+    strat_labels_sub: np.ndarray,
+    n_train_full: int,
+    n_train_sub: int,
+    data_module_name: str,
+    corr_module_name: str,
+    n_splits: int,
+    target_seed: int,
+    feature_set: str,
+    base_config: dict,
+) -> Dict[str, Any]:
+    """Run one (repeat × fraction × model × target) task in an isolated worker.
+
+    Forces ``ML_FOLD_WORKERS=1`` to prevent nested process-pool conflicts when
+    dispatched from a ``task_workers > 1`` Parallel call.
+    """
+    import os as _os
+    _os.environ["ML_PARALLEL_WORKER"] = "1"
+    _os.environ["ML_FOLD_WORKERS"] = "1"
+
+    pipeline_factory = create_pipeline_factory(
+        data_module_name, model_name, corr_module_name, target_seed, feature_set, base_config
+    )
+    corr_module = get_correction_module(corr_module_name)
+    cv_result = run_cv_for_subsample(
+        X_sub, y_sub, strat_labels_sub, pipeline_factory, corr_module, n_splits, target_seed
+    )
+    summary = cv_result['summary']
+
+    return {
+        'fraction': fraction,
+        'repeat': repeat_id,
+        'model': model_name,
+        'target': target_name,
+        'feature_set': feature_set,
+        'data_module': data_module_name,
+        'correction_module': corr_module_name,
+        'n_splits_used': cv_result['n_splits_used'],
+        'n_splits_requested': n_splits,
+        'n_effective_bins': cv_result['n_effective_bins'],
+        'n_bins_raw': cv_result['n_bins_raw'],
+        'n_bins_merged': cv_result['n_bins_merged'],
+        'bins_merged': cv_result['bins_merged'],
+        'n_train_full': n_train_full,
+        'n_train_sub': n_train_sub,
+        'rmse_mean': summary.get('rmse_mean', np.nan),
+        'rmse_std': summary.get('rmse_std', np.nan),
+        'r2_mean': summary.get('r2_mean', np.nan),
+        'r2_std': summary.get('r2_std', np.nan),
+        'mae_mean': summary.get('mae_mean', np.nan),
+        'mbe_mean': summary.get('mbe_mean', np.nan),
+        'slope_mean': summary.get('slope_mean', np.nan),
+    }
+
+
 # ============================================================
+# Nested subsampling
 # ============================================================
 
 def create_nested_subsamples(
     indices: np.ndarray,
     strat_labels: np.ndarray,
     fractions: List[float],
-    seed: int
+    seed: int,
 ) -> Dict[float, np.ndarray]:
-    """
-    Create nested subsamples where fractions are absolute proportions
-    of the full dataset, while keeping per-bin stratification.
-    """
+    """Create nested stratified subsamples at each fraction of the full dataset."""
     rng = np.random.RandomState(seed)
-
-    # Build per-bin shuffled index lists based on the full dataset
     bin_to_indices = {}
     for bin_id in np.unique(strat_labels):
         local_idx = np.where(strat_labels == bin_id)[0]
         if local_idx.size == 0:
             continue
-        shuffled_local = rng.permutation(local_idx)
-        bin_to_indices[int(bin_id)] = indices[shuffled_local]
+        bin_to_indices[int(bin_id)] = indices[rng.permutation(local_idx)]
 
     nested_indices = {}
     for frac in sorted(fractions):
@@ -246,15 +283,16 @@ def create_nested_subsamples(
         selected = []
         for bin_id in sorted(bin_to_indices.keys()):
             bin_indices = bin_to_indices[bin_id]
-            n_full = len(bin_indices)
-            n_take = int(np.ceil(n_full * frac))
-            n_take = max(1, n_take)
-            n_take = min(n_take, n_full)
+            n_take = max(1, min(int(np.ceil(len(bin_indices) * frac)), len(bin_indices)))
             selected.extend(bin_indices[:n_take].tolist())
         nested_indices[frac] = np.array(selected, dtype=int)
 
     return nested_indices
 
+
+# ============================================================
+# Main learning-curve runner
+# ============================================================
 
 def run_learning_curve(
     X_train_full: np.ndarray,
@@ -269,151 +307,74 @@ def run_learning_curve(
     n_splits: int,
     base_seed: int,
     feature_set: str,
-    output_dir: Optional[str] = None,
-    resume: bool = False,
-    checkpoint_interval: int = 20,
+    task_workers: int = 1,
     verbose: bool = True,
 ) -> pd.DataFrame:
-    """run_learning_curve function."""
-    runs_records = []
     n_train_full = len(X_train_full)
     train_full_indices = np.arange(n_train_full)
 
-    completed_tasks = set()
-    if output_dir and resume:
-        import re
-        checkpoint_files = []
-        for fname in os.listdir(output_dir):
-            if fname.startswith("learning_curve_checkpoint"):
-                fpath = os.path.join(output_dir, fname)
-                m = re.match(r"learning_curve_checkpoint_task(\d+)\.csv", fname)
-                if m:
-                    checkpoint_files.append((int(m.group(1)), fpath))
-                elif fname == "learning_curve_checkpoint.csv":
-                    checkpoint_files.append((0, fpath))
-
-        if checkpoint_files:
-            checkpoint_files.sort(reverse=True)
-            latest_checkpoint = checkpoint_files[0][1]
-            try:
-                existing_df = pd.read_csv(latest_checkpoint)
-                for _, row in existing_df.iterrows():
-                    key = (row['repeat'], row['fraction'], row['model'], row['target'])
-                    completed_tasks.add(key)
-                    runs_records.append(row.to_dict())
-                if verbose:
-                    print(f"  [Resume] loaded {len(completed_tasks)} completed tasks from {os.path.basename(latest_checkpoint)}")
-            except Exception as e:
-                if verbose:
-                    print(f"  [Resume] failed to load checkpoint: {e}")
-
-    total_iterations = len(fractions) * len(repeat_ids) * len(models) * len(targets)
-    current_iter = 0
-    new_task_count = 0
-
+    # Pre-compute all tasks: subsample X/y arrays so each worker receives
+    # only its own small slice (avoids serializing X_train_full per task).
+    tasks = []
     for repeat_id in repeat_ids:
         repeat_seed = base_seed + repeat_id
-
         nested_indices = create_nested_subsamples(
-            train_full_indices,
-            strat_labels_train_full,
-            fractions,
-            seed=repeat_seed
+            train_full_indices, strat_labels_train_full, fractions, seed=repeat_seed
         )
-
         for fraction in fractions:
             sub_indices = nested_indices[fraction]
-
             X_sub = X_train_full[sub_indices]
             strat_labels_sub = strat_labels_train_full[sub_indices]
             n_train_sub = len(sub_indices)
-
             for model_name in models:
-                corr_module = get_correction_module(corr_module_name)
-
                 for target_name, y_full in targets:
-                    target_seed = _derive_target_seed(repeat_seed, target_name)
-                    pipeline_factory = create_pipeline_factory(
-                        data_module_name,
-                        model_name,
-                        corr_module_name,
-                        target_seed,
-                        feature_set,
-                        BASE_CONFIG,
-                    )
-                    current_iter += 1
-
-                    task_key = (repeat_id, fraction, model_name, target_name)
-                    if task_key in completed_tasks:
-                        if verbose:
-                            progress = current_iter / total_iterations * 100
-                            print(f"\r  Progress: {progress:5.1f}% | [skip] rep={repeat_id:03d} frac={fraction:.1f} model={model_name:8s} target={target_name}", end="")
-                        continue
-
+                    target_seed = derive_target_seed(repeat_seed, target_name)
                     y_sub = y_full[sub_indices]
+                    tasks.append(dict(
+                        repeat_id=repeat_id,
+                        fraction=fraction,
+                        model_name=model_name,
+                        target_name=target_name,
+                        X_sub=X_sub,
+                        y_sub=y_sub,
+                        strat_labels_sub=strat_labels_sub,
+                        n_train_full=n_train_full,
+                        n_train_sub=n_train_sub,
+                        data_module_name=data_module_name,
+                        corr_module_name=corr_module_name,
+                        n_splits=n_splits,
+                        target_seed=target_seed,
+                        feature_set=feature_set,
+                        base_config=BASE_CONFIG,
+                    ))
 
-                    if verbose:
-                        progress = current_iter / total_iterations * 100
-                        print(f"\r  Progress: {progress:5.1f}% | rep={repeat_id:03d} frac={fraction:.1f} model={model_name:8s} target={target_name}", end="")
-
-                    cv_result = run_cv_for_subsample(
-                        X_sub, y_sub, strat_labels_sub,
-                        pipeline_factory, corr_module, n_splits, target_seed
-                    )
-
-                    summary = cv_result['summary']
-
-                    record = {
-                        'fraction': fraction,
-                        'repeat': repeat_id,
-                        'model': model_name,
-                        'target': target_name,
-                        'feature_set': feature_set,
-                        'data_module': data_module_name,
-                        'correction_module': corr_module_name,
-                        'n_splits_used': cv_result['n_splits_used'],
-                        'n_splits_requested': n_splits,
-                        'n_effective_bins': cv_result['n_effective_bins'],
-                        'n_bins_raw': cv_result['n_bins_raw'],
-                        'n_bins_merged': cv_result['n_bins_merged'],
-                        'bins_merged': cv_result['bins_merged'],
-                        'n_train_full': n_train_full,
-                        'n_train_sub': n_train_sub,
-                        'rmse_mean': summary.get('rmse_mean', np.nan),
-                        'rmse_std': summary.get('rmse_std', np.nan),
-                        'r2_mean': summary.get('r2_mean', np.nan),
-                        'r2_std': summary.get('r2_std', np.nan),
-                        'mae_mean': summary.get('mae_mean', np.nan),
-                        'mbe_mean': summary.get('mbe_mean', np.nan),
-                        'slope_mean': summary.get('slope_mean', np.nan),
-                    }
-                    runs_records.append(record)
-                    new_task_count += 1
-
-                    if output_dir and checkpoint_interval > 0 and new_task_count % checkpoint_interval == 0:
-                        checkpoint_df = pd.DataFrame(runs_records)
-                        checkpoint_file = os.path.join(output_dir, f"learning_curve_checkpoint_task{new_task_count:05d}.csv")
-                        checkpoint_df.to_csv(checkpoint_file, index=False)
-                        if verbose:
-                            print(f"\n  [Checkpoint] task={new_task_count} saved {len(runs_records)} records -> {os.path.basename(checkpoint_file)}")
-
+    total = len(tasks)
     if verbose:
-        print()
+        print(f"  Total tasks: {total}"
+              f" ({len(repeat_ids)} repeats × {len(fractions)} fractions"
+              f" × {len(models)} models × {len(targets)} targets)")
 
-    if output_dir and new_task_count > 0:
-        checkpoint_df = pd.DataFrame(runs_records)
-        checkpoint_file = os.path.join(output_dir, "learning_curve_checkpoint.csv")
-        checkpoint_df.to_csv(checkpoint_file, index=False)
+    if task_workers > 1:
+        from joblib import Parallel, delayed
+        if verbose:
+            print(f"  Running in parallel (workers={task_workers}, backend=loky) ...")
+        records = Parallel(n_jobs=task_workers, backend="loky")(
+            delayed(_run_single_lc_task)(**t) for t in tasks
+        )
+    else:
+        records = []
+        for i, t in enumerate(tasks):
+            records.append(_run_single_lc_task(**t))
+            if verbose and (i + 1) % 50 == 0:
+                print(f"\r  Progress: {(i + 1) / total * 100:5.1f}%  ({i+1}/{total})", end="")
+        if verbose:
+            print()
 
-    runs_df = pd.DataFrame(runs_records)
-
-    return runs_df
+    return pd.DataFrame(records)
 
 
 # ============================================================
-# ============================================================
-
-# ============================================================
+# CLI
 # ============================================================
 
 def main():
@@ -422,37 +383,35 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Default run (ERT + Stacking, Liquid feature set, 30 repeats)
+  # Default run (ERT + CatBoost + Stacking, Liquid, 30 repeats, auto workers)
   python tools/run_learning_curve.py
 
   # Use NoLiquid feature set
   python tools/run_learning_curve.py --feature-set noliq
 
-  # Add CatBoost model
-  python tools/run_learning_curve.py --models ert stacking catboost
+  # ERT only, quick test
+  python tools/run_learning_curve.py --models ert --repeats 5 --n-splits 5
 
-  # Reduce repeats for a quick test
-  python tools/run_learning_curve.py --repeats 5 --n-splits 5
-
-  # Custom sampling fractions
-  python tools/run_learning_curve.py --fractions 0.1 0.3 0.5 0.7 0.9 1.0
+  # Force sequential
+  python tools/run_learning_curve.py --task-workers 1
 """
     )
 
     parser.add_argument('--feature-set', type=str, default='liq',
                         choices=['liq', 'noliq', 'Liquid', 'NoLiquid'],
-                        help='Feature set: liq (Liquid) or noliq (NoLiquid)')
+                        help='Feature set (default: liq = Liquid)')
     parser.add_argument('--data-module', type=str, default='augmented',
                         choices=['raw', 'balanced', 'augmented'],
-                        help='Data module (default: augmented, best-performing data strategy)')
+                        help='Data module (default: augmented)')
     parser.add_argument('--corr-module', type=str, default='none',
                         choices=['none', 'segmented'],
                         help='Correction module (default: none)')
-
-    parser.add_argument('--models', nargs='+', type=str, default=['ert', 'stacking'],
+    parser.add_argument('--models', nargs='+', type=str,
+                        default=['ert', 'catboost', 'stacking'],
                         choices=['ert', 'catboost', 'stacking'],
-                        help='Model list (default: ert stacking)')
-    parser.add_argument('--fractions', nargs='+', type=float, default=[0.2, 0.4, 0.6, 0.8, 1.0],
+                        help='Model list (default: ert catboost stacking)')
+    parser.add_argument('--fractions', nargs='+', type=float,
+                        default=[0.2, 0.4, 0.6, 0.8, 1.0],
                         help='Sampling fractions (default: 0.2 0.4 0.6 0.8 1.0)')
     parser.add_argument('--repeats', type=int, default=30,
                         help='Number of repeats per fraction (default: 30)')
@@ -464,21 +423,25 @@ Examples:
                         help='merge runs from directory and finalize summary')
     parser.add_argument('--n-splits', type=int, default=10,
                         help='Number of CV folds (default: 10)')
-
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Output directory (default: results/learning_curve)')
-
-    parser.add_argument('--resume', action='store_true',
-                        help='Resume from previous run (automatically skips completed tasks)')
-    parser.add_argument('--checkpoint-interval', type=int, default=20,
-                        help='Checkpoint interval (default: save every 20 tasks)')
-
-    parser.add_argument('--no-plot', action='store_true',
-                        help='Plot generation is handled by tools/plot_offline_figures.py')
+    parser.add_argument('--task-workers', type=int, default=None,
+                        help='Parallel task workers (default: auto = max(1, cpu_count // n_jobs)).'
+                             ' Set to 1 to force sequential.')
 
     args = parser.parse_args()
+
+    # Auto-detect task_workers using the same formula as fold/repeat workers
+    if args.task_workers is None:
+        from src.runtime import get_n_jobs
+        cpu_count = os.cpu_count() or 1
+        n_jobs = get_n_jobs()
+        n_per_worker = n_jobs if n_jobs > 0 else cpu_count
+        task_workers = max(1, cpu_count // n_per_worker)
+    else:
+        task_workers = max(1, args.task_workers)
 
     if (args.repeat_start is None) ^ (args.repeat_end is None):
         raise ValueError("repeat-start and repeat-end must be provided together")
@@ -494,9 +457,7 @@ Examples:
         segmented = True
 
     repeat_ids = list(range(repeat_start, repeat_end + 1))
-
     feature_set = 'Liquid' if args.feature_set.lower() in ['liq', 'liquid'] else 'NoLiquid'
-
     output_dir = args.output_dir if args.output_dir else os.path.join(BASE_CONFIG['output_dir'], OUTPUT_SUBDIR)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -504,45 +465,31 @@ Examples:
         print("=" * 70)
         print("Learning Curve - finalize from runs")
         print("=" * 70)
-        print(f"  merge_dir: {args.merge_dir}")
-        print(f"  output_dir: {output_dir}")
-
         runs_df = merge_runs_files(args.merge_dir)
         summary_df = summarize_runs(runs_df, args.n_splits)
-
-        runs_path = os.path.join(output_dir, "learning_curve_runs.csv")
-        summary_path = os.path.join(output_dir, "learning_curve_summary.csv")
-        runs_df.to_csv(runs_path, index=False)
-        summary_df.to_csv(summary_path, index=False)
-
-        print(f"  runs: {runs_path}")
-        print(f"  summary: {summary_path}")
-
-        print("  Generate figures with tools/plot_offline_figures.py")
-
+        runs_df.to_csv(os.path.join(output_dir, "learning_curve_runs.csv"), index=False)
+        summary_df.to_csv(os.path.join(output_dir, "learning_curve_summary.csv"), index=False)
+        print(f"  runs:    {os.path.join(output_dir, 'learning_curve_runs.csv')}")
+        print(f"  summary: {os.path.join(output_dir, 'learning_curve_summary.csv')}")
         return runs_df, summary_df
 
     print("=" * 70)
     print("Learning Curve Tool - Model-Complexity Benefit Analysis")
     print("=" * 70)
-    print(f"  Feature set: {feature_set}")
-    print(f"  Data module: {args.data_module}")
-    print(f"  Correction module: {args.corr_module}")
-    print(f"  Models: {args.models}")
-    print(f"  Fractions: {args.fractions}")
-    if segmented:
-        print(f"  repeat range: {repeat_start}-{repeat_end}")
-    else:
-        print(f"  repeats: {args.repeats}")
-    print(f"  CV folds: {args.n_splits}")
-    print(f"  Random seed: {args.seed}")
-    print(f"  Output directory: {output_dir}")
+    print(f"  Feature set:   {feature_set}")
+    print(f"  Data module:   {args.data_module}")
+    print(f"  Models:        {args.models}")
+    print(f"  Fractions:     {args.fractions}")
+    print(f"  Repeats:       {len(repeat_ids)} ({repeat_start}–{repeat_end})")
+    print(f"  CV folds:      {args.n_splits}")
+    print(f"  Task workers:  {task_workers}")
+    print(f"  Output:        {output_dir}")
     print("=" * 70)
 
-    print("\n[1/4] Loading data...")
+    print("\n[1/3] Loading data...")
     X, y_T, y_P = load_data(BASE_CONFIG, feature_set=feature_set)
 
-    print("\n[2/4] Preparing data split...")
+    print("\n[2/3] Preparing data split...")
     split_data = prepare_splits(X, y_T, y_P, {'random_seed': args.seed})
     train_idx = split_data['train_idx']
     tp_bins_train = split_data['tp_bins_train']
@@ -550,14 +497,10 @@ Examples:
     X_train_full = X[train_idx]
     y_T_train_full = y_T[train_idx]
     y_P_train_full = y_P[train_idx]
+    print(f"  Training set: {len(train_idx)} samples, {len(np.unique(tp_bins_train))} P-T bins")
 
-    print(f"  Training set size: {len(train_idx)}")
-    print(f"  Number of P-T bins: {len(np.unique(tp_bins_train))}")
-
-    print("\n[3/4] Running learning-curve experiments...")
+    print("\n[3/3] Running learning-curve experiments...")
     start_time = time.time()
-
-    targets = [('T', y_T_train_full), ('P', y_P_train_full)]
 
     runs_df = run_learning_curve(
         X_train_full=X_train_full,
@@ -566,72 +509,51 @@ Examples:
         fractions=args.fractions,
         repeat_ids=repeat_ids,
         models=args.models,
-        targets=targets,
+        targets=[('T', y_T_train_full), ('P', y_P_train_full)],
         data_module_name=args.data_module,
         corr_module_name=args.corr_module,
         n_splits=args.n_splits,
         base_seed=args.seed,
         feature_set=feature_set,
-        output_dir=output_dir,
-        resume=args.resume,
-        checkpoint_interval=args.checkpoint_interval,
+        task_workers=task_workers,
         verbose=True,
     )
 
     elapsed = time.time() - start_time
-    print(f"\n  Experiment finished in {elapsed:.1f} s")
+    print(f"  Finished in {elapsed:.1f}s")
 
-    print("\n[4/4] Saving results...")
     if segmented:
         runs_name = f"learning_curve_runs_rep_{repeat_start:03d}_{repeat_end:03d}.csv"
-    else:
-        runs_name = "learning_curve_runs.csv"
-
-    runs_path = os.path.join(output_dir, runs_name)
-    runs_df.to_csv(runs_path, index=False)
-    print(f"  runs: {runs_path}")
-
-    if segmented:
-        print("  segment mode: summary/plots skipped (use --merge-dir to finalize)")
+        runs_df.to_csv(os.path.join(output_dir, runs_name), index=False)
+        print(f"  runs: {os.path.join(output_dir, runs_name)}")
+        print("  segment mode: use --merge-dir to finalize")
         return runs_df, None
 
+    runs_df.to_csv(os.path.join(output_dir, "learning_curve_runs.csv"), index=False)
     summary_df = summarize_runs(runs_df, args.n_splits)
-    summary_path = os.path.join(output_dir, "learning_curve_summary.csv")
-    summary_df.to_csv(summary_path, index=False)
-    print(f"  summary: {summary_path}")
-
-    print("  Generate figures with tools/plot_offline_figures.py")
+    summary_df.to_csv(os.path.join(output_dir, "learning_curve_summary.csv"), index=False)
+    print(f"  runs:    {os.path.join(output_dir, 'learning_curve_runs.csv')}")
+    print(f"  summary: {os.path.join(output_dir, 'learning_curve_summary.csv')}")
+    print("  Figures: python tools/plot_offline_figures.py")
 
     print("\n" + "=" * 70)
     print("Results Summary")
     print("=" * 70)
-
     for target in ['T', 'P']:
         print(f"\nTarget: {target}")
         target_df = summary_df[summary_df['target'] == target]
         if target_df.empty:
             continue
-
-        display_cols = ['fraction', 'model', 'n_train_sub_mean', 'rmse_mean_of_repeats', 'rmse_std_of_repeats', 'r2_mean_of_repeats']
+        display_cols = ['fraction', 'model', 'n_train_sub_mean',
+                        'rmse_mean_of_repeats', 'rmse_std_of_repeats', 'r2_mean_of_repeats']
         available_cols = [c for c in display_cols if c in target_df.columns]
         print(target_df[available_cols].to_string(index=False))
-
-    print("\n" + "=" * 70)
-    print("Done")
-    print("=" * 70)
 
     return runs_df, summary_df
 
 
 if __name__ == '__main__':
-    def _init_logging():
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_filename = f"learning_curve_{timestamp}_{os.getpid()}.log"
-        setup_logging(log_filename=log_filename)
-        global logger
-        logger = get_logger(__name__)
-
-    _init_logging()
+    logger = init_tool_logging("learning_curve")
     try:
         main()
     except Exception:

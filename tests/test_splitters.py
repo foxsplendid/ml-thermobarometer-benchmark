@@ -3,7 +3,7 @@
 
 import pytest
 import numpy as np
-from src.splitters import (
+from src.utils import (
     compute_pt_edges,
     assign_pt_bins,
     select_test_indices,

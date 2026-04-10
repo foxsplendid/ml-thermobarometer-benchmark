@@ -27,7 +27,7 @@ class MCUncertaintyEstimator(UncertaintyModule):
                              fold_idx: int = 0
                              ) -> Dict[str, np.ndarray]:
         """predict_distribution function."""
-        from .perturbation import get_rel_err_vector, epma_perturb
+        from .utils import get_rel_err_vector, epma_perturb
 
         seed_offset = mc_params.get('seed_offset', 0) if mc_params else 0
         effective_seed = self.random_seed + fold_idx + seed_offset

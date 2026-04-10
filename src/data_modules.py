@@ -129,7 +129,7 @@ class AugmentedDataModule(DataModule):
                       fold_seed: Optional[int] = None,
                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, DataModuleState]:
         """fit_transform function."""
-        from .perturbation import get_rel_err_vector, epma_perturb
+        from .utils import get_rel_err_vector, epma_perturb
 
         if fold_seed is not None:
             effective_seed = fold_seed
