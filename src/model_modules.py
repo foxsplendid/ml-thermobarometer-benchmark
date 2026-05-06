@@ -209,86 +209,6 @@ class RandomForestModel(ModelModule):
 # ============================================================
 # ============================================================
 
-class SVRModel(ModelModule):
-    """SVRModel — 核方法回归，为 Stacking 提供与树模型正交的归纳偏置。
-
-    输入应已标准化（Pipeline 通过 DataModule 在 fit_transform 中完成缩放）。
-    SVR 本身无随机性，random_seed 参数仅为保持接口统一，不影响输出。
-
-    自动规模切换策略：
-      n_samples <= linear_threshold : 使用 SVR(RBF)，O(n²) 但核方法精度高
-      n_samples >  linear_threshold : 自动切换到 LinearSVR，O(n)，避免增强
-                                       数据集上的内存/时间爆炸（~30k 样本时
-                                       RBF 核矩阵需 5GB+ 内存，耗时数小时）
-    """
-
-    # 样本数超过此阈值时自动切换 LinearSVR
-    LINEAR_THRESHOLD: int = 5_000
-
-    def __init__(self,
-                 kernel: str = 'rbf',
-                 C: float = 10.0,
-                 epsilon: float = 0.1,
-                 gamma: str = 'scale',
-                 linear_threshold: Optional[int] = None,
-                 random_seed: int = 42,
-                 **kwargs):
-        """__init__ function."""
-        self.kernel = kernel
-        self.C = C
-        self.epsilon = epsilon
-        self.gamma = gamma
-        self.linear_threshold = linear_threshold if linear_threshold is not None \
-            else self.LINEAR_THRESHOLD
-        self.extra_kwargs = kwargs
-        self._training_time = 0.0
-
-    def fit(self,
-            X_train: np.ndarray,
-            y_train: np.ndarray,
-            sample_weights: Optional[np.ndarray] = None,
-            stratify_labels: Optional[np.ndarray] = None) -> Any:
-        """fit function."""
-        start_time = time.time()
-
-        if X_train.shape[0] > self.linear_threshold:
-            # 大数据集：LinearSVR，O(n) 复杂度
-            from sklearn.svm import LinearSVR
-            model = LinearSVR(
-                C=self.C,
-                epsilon=self.epsilon,
-                max_iter=10000,
-                **{k: v for k, v in self.extra_kwargs.items()
-                   if k not in ('gamma',)}  # LinearSVR 不接受 gamma
-            )
-        else:
-            # 小数据集：RBF-SVR，保留核方法归纳偏置
-            from sklearn.svm import SVR
-            model = SVR(
-                kernel=self.kernel,
-                C=self.C,
-                epsilon=self.epsilon,
-                gamma=self.gamma,
-                **self.extra_kwargs,
-            )
-
-        model.fit(X_train, y_train, sample_weight=sample_weights)
-        self._training_time = time.time() - start_time
-        return model
-
-    def predict(self, model: Any, X: np.ndarray) -> np.ndarray:
-        """predict function."""
-        return model.predict(X)
-
-    def get_feature_importance(self, model: Any) -> np.ndarray:
-        """get_feature_importance function."""
-        # SVR/LinearSVR 无树结构，返回空数组
-        return np.array([])
-
-
-# ============================================================
-# ============================================================
-
 # 模型键到构造器的注册表，供 StrictOOFStacking 动态构建基学习器使用
 def _build_base_model_registry(random_seed: int) -> Dict[str, Any]:
     """_build_base_model_registry function."""
@@ -296,7 +216,6 @@ def _build_base_model_registry(random_seed: int) -> Dict[str, Any]:
         'ert':      lambda p: ExtraTreesModel(random_seed=random_seed, **p),
         'catboost': lambda p: CatBoostModel(random_seed=random_seed, **p),
         'rf':       lambda p: RandomForestModel(random_seed=random_seed, **p),
-        'svr':      lambda p: SVRModel(random_seed=random_seed, **p),
         'ridge':    lambda p: RidgeModel(**p),
     }
 
@@ -519,7 +438,6 @@ def get_model_module(name: str, **kwargs) -> ModelModule:
         'cb': CatBoostModel,
         'rf': RandomForestModel,
         'randomforest': RandomForestModel,
-        'svr': SVRModel,
         'stacking': StrictOOFStacking,
     }
     
