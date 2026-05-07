@@ -240,11 +240,15 @@ def _plot_single_shap_for_model(model: Any,
                                 max_display: int = 22,
                                 bg_k: int = 50,
                                 force: bool = False,
-                                figsize: tuple = (12, 10),
+                                figsize: tuple = None,
                                 font_size: int = 12) -> None:
     if (not force) and os.path.exists(save_path):
         print(f"SHAP exists, skip: {save_path}")
         return
+
+    if figsize is None:
+        fig_h = max(10.0 * X_df.shape[1] / 18 + 1.5, 5.0)
+        figsize = (12, fig_h)
 
     def predict_fn(X):
         return _predict_with_module(model_module, model, X)
@@ -498,7 +502,8 @@ def _plot_shap(exp_id: str,
                data_encoding: str = 'latin-1',
                max_samples: int = 300,
                bg_k: int = 50,
-               force: bool = False) -> None:
+               force: bool = False,
+               remove_single: bool = True) -> None:
     for target in ['T', 'P']:
         model_data = _load_model(results_dir, exp_id, target)
         if model_data is None:
@@ -550,14 +555,120 @@ def _plot_shap(exp_id: str,
                     max_display=22,
                     bg_k=bg_k,
                     force=force,
-                    figsize=(12, 10),
                     font_size=12,
                 )
             except Exception as e:
                 print(f"skip: SHAP failed for {exp_id}_{target}: {e}")
 
-    # Merge T/P SHAP plots into one TP image and remove single-target files.
-    _merge_shap_tp_images(exp_id=exp_id, fig_dir=fig_dir, remove_single=True)
+    # Merge T/P SHAP plots into one TP image; removal of single-target files
+    # is controlled by the caller (set remove_single=False when a 2x2 merge
+    # will consume the individual panels afterwards).
+    _merge_shap_tp_images(exp_id=exp_id, fig_dir=fig_dir, remove_single=remove_single)
+
+
+def _merge_shap_2x2(exp_id_liq: str,
+                    exp_id_noliq: str,
+                    fig_dir: str,
+                    remove_panels: bool = True) -> None:
+    """Compose a 2x2 SHAP figure: rows = Liquid / NoLiquid; cols = T / P."""
+    import matplotlib.image as mpimg
+
+    def _find_panel(exp_id: str, target: str) -> Optional[str]:
+        prefix = f"{exp_id}_{target}_SHAP_combined_"
+        candidates = [
+            os.path.join(fig_dir, f)
+            for f in os.listdir(fig_dir)
+            if f.startswith(prefix) and f.endswith(".png")
+        ]
+        if not candidates:
+            print(f"skip: _merge_shap_2x2 missing panel for {exp_id}_{target}")
+            return None
+        return candidates[0]
+
+    paths = {
+        (exp_id_liq,   'T'): _find_panel(exp_id_liq,   'T'),
+        (exp_id_liq,   'P'): _find_panel(exp_id_liq,   'P'),
+        (exp_id_noliq, 'T'): _find_panel(exp_id_noliq, 'T'),
+        (exp_id_noliq, 'P'): _find_panel(exp_id_noliq, 'P'),
+    }
+    if any(v is None for v in paths.values()):
+        return
+
+    imgs = [mpimg.imread(p) for p in paths.values()]
+
+    def _to_float(arr: np.ndarray) -> np.ndarray:
+        return arr.astype(np.float32) / 255.0 if arr.dtype == np.uint8 else arr.astype(np.float32)
+
+    imgs = [_to_float(im) for im in imgs]
+
+    max_h = max(im.shape[0] for im in imgs)
+    max_w = max(im.shape[1] for im in imgs)
+
+    def _pad_white(im: np.ndarray) -> np.ndarray:
+        h, w = im.shape[:2]
+        c = im.shape[2] if im.ndim == 3 else 1
+        canvas = np.ones((max_h, max_w, c), dtype=np.float32)
+        ph, pw = (max_h - h) // 2, (max_w - w) // 2
+        canvas[ph:ph + h, pw:pw + w] = im
+        return canvas
+
+    imgs = [_pad_white(im) for im in imgs]
+
+    panel_w_in = max_w / 300.0
+    panel_h_in = max_h / 300.0
+    fig, axes = plt.subplots(2, 2, figsize=(panel_w_in * 2, panel_h_in * 2), dpi=300)
+    for ax, im in zip(axes.ravel(), imgs):
+        ax.imshow(im, interpolation='lanczos')
+        ax.axis('off')
+    plt.subplots_adjust(left=0.002, right=0.998, top=0.998, bottom=0.002,
+                        wspace=0.01, hspace=0.01)
+
+    out_png = os.path.join(fig_dir, "Figure5_revised.png")
+    out_pdf = os.path.join(fig_dir, "Figure5_revised.pdf")
+    fig.savefig(out_png, dpi=300, bbox_inches='tight')
+    fig.savefig(out_pdf, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"saved: {out_png}")
+    print(f"saved: {out_pdf}")
+
+    if remove_panels:
+        for p in paths.values():
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def _plot_shap_figure5(exp_id_liq: str,
+                       results_dir: str,
+                       fig_dir: str,
+                       data_path: str,
+                       data_encoding: str = 'latin-1',
+                       max_samples: int = 300,
+                       bg_k: int = 50,
+                       force: bool = False) -> None:
+    """Plot SHAP for both Liquid and NoLiquid configs and assemble a 2x2 Figure 5."""
+    exp_id_noliq = exp_id_liq.replace('_liq', '_noliq')
+
+    for exp_id in (exp_id_liq, exp_id_noliq):
+        _plot_shap(
+            exp_id=exp_id,
+            results_dir=results_dir,
+            fig_dir=fig_dir,
+            data_path=data_path,
+            data_encoding=data_encoding,
+            max_samples=max_samples,
+            bg_k=bg_k,
+            force=force,
+            remove_single=False,
+        )
+
+    _merge_shap_2x2(
+        exp_id_liq=exp_id_liq,
+        exp_id_noliq=exp_id_noliq,
+        fig_dir=fig_dir,
+        remove_panels=True,
+    )
 
 
 def _plot_correction_delta_scatter(results_dir: str, fig_dir: str, exp_id: str) -> None:
@@ -1020,8 +1131,8 @@ def main() -> int:
         _plot_parity_compare(args.results_dir, fig_dir)
         _plot_learning_curve(args.learning_curve_dir, fig_dir)
 
-        _plot_shap(
-            exp_id=args.exp_id,
+        _plot_shap_figure5(
+            exp_id_liq=args.exp_id,
             results_dir=args.results_dir,
             fig_dir=fig_dir,
             data_path=args.data_path,
@@ -1061,8 +1172,8 @@ def main() -> int:
         data_encoding=base_config.get("data_encoding", "latin-1"),
     )
     _plot_correction_delta_scatter(args.results_dir, fig_dir, args.correction_delta_exp_id)
-    _plot_shap(
-        exp_id=args.exp_id,
+    _plot_shap_figure5(
+        exp_id_liq=args.exp_id,
         results_dir=args.results_dir,
         fig_dir=fig_dir,
         data_path=args.data_path,
