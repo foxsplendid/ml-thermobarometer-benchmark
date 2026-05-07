@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Offline plotting smoke test for available experiment artifacts.
+Offline figure generation for paper figures.
 
-This script only reads existing files under results/ and generates figures.
-No model training is performed.
+Run without arguments to generate all paper figures (Fig. 1, 3-8).
+Use --debug for additional diagnostic plots.
 """
 import argparse
 import logging
@@ -66,6 +66,15 @@ def _save_any(fig_or_ax, filepath: str) -> None:
     save_figure(fig, filepath)
 
 
+def _save_paper_figure(fig: plt.Figure, fig_dir: str, stem: str, dpi: int = 300) -> None:
+    """Save a paper figure as both PNG and PDF, then close it."""
+    for ext in ('png', 'pdf'):
+        path = os.path.join(fig_dir, f"{stem}.{ext}")
+        fig.savefig(path, dpi=dpi, bbox_inches='tight', facecolor=fig.get_facecolor())
+        print(f"saved: {path}")
+    plt.close(fig)
+
+
 def _load_predictions(results_dir: str, exp_id: str, target: str) -> Optional[pd.DataFrame]:
     path = os.path.join(results_dir, f"{exp_id}_{target}_predictions.parquet")
     if not os.path.exists(path):
@@ -112,7 +121,6 @@ def _load_learning_curve_summary(learning_curve_dir: str) -> Optional[pd.DataFra
 
 
 def _load_model(results_dir: str, exp_id: str, target: str) -> Optional[Dict]:
-    """Load a saved model artifact."""
     path = os.path.join(results_dir, "models", f"{exp_id}_{target}_model.joblib")
     if not os.path.exists(path):
         print(f"skip: missing {path}")
@@ -171,7 +179,6 @@ def _compute_shap_values(model: Any,
                          X_df: pd.DataFrame,
                          bg_k: int) -> Any:
     if _is_tree_model(model):
-        # Use SHAP's tree-aware explainer for tree-based models.
         explainer = shap.Explainer(model, X_df)
         shap_values = explainer(X_df)
     else:
@@ -267,8 +274,8 @@ def _plot_single_shap_for_model(model: Any,
     print(f"saved: {save_path}")
 
 
-def _merge_two_images_horizontally(left_path: str, right_path: str, output_path: str) -> None:
-    import matplotlib.pyplot as plt
+def _merge_two_images_horizontally(left_path: str, right_path: str,
+                                   output_path: Optional[str] = None) -> Optional[plt.Figure]:
     import matplotlib.image as mpimg
 
     img_l = mpimg.imread(left_path)
@@ -285,12 +292,16 @@ def _merge_two_images_horizontally(left_path: str, right_path: str, output_path:
     axes[0].axis('off')
     axes[1].axis('off')
     plt.tight_layout(pad=0.1)
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
+
+    if output_path is not None:
+        fig.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        return None
+    return fig
 
 
-def _merge_two_images_vertically(top_path: str, bottom_path: str, output_path: str) -> None:
-    import matplotlib.pyplot as plt
+def _merge_two_images_vertically(top_path: str, bottom_path: str,
+                                 output_path: Optional[str] = None) -> Optional[plt.Figure]:
     import matplotlib.image as mpimg
 
     img_t = mpimg.imread(top_path)
@@ -298,7 +309,6 @@ def _merge_two_images_vertically(top_path: str, bottom_path: str, output_path: s
 
     ratio_t = img_t.shape[1] / max(1, img_t.shape[0])
     ratio_b = img_b.shape[1] / max(1, img_b.shape[0])
-    # Keep both panels legible and preserve relative aspect.
     fig_w = max(8.0, 6.0 * max(ratio_t, ratio_b))
     fig_h = fig_w / max(1e-6, ratio_t) + fig_w / max(1e-6, ratio_b)
 
@@ -308,8 +318,12 @@ def _merge_two_images_vertically(top_path: str, bottom_path: str, output_path: s
     axes[0].axis('off')
     axes[1].axis('off')
     plt.tight_layout(pad=0.1)
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
+
+    if output_path is not None:
+        fig.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        return None
+    return fig
 
 
 def _merge_shap_tp_images(exp_id: str, fig_dir: str, remove_single: bool = True) -> None:
@@ -327,57 +341,15 @@ def _merge_shap_tp_images(exp_id: str, fig_dir: str, remove_single: bool = True)
 
         tp_name = f"{exp_id}_TP_SHAP_combined_{suffix}"
         tp_path = os.path.join(fig_dir, tp_name)
-        _merge_two_images_horizontally(t_path, p_path, tp_path)
+        _merge_two_images_horizontally(t_path, p_path, output_path=tp_path)
         print(f"saved: {tp_path}")
 
         if remove_single:
-            try:
-                os.remove(t_path)
-            except OSError:
-                pass
-            try:
-                os.remove(p_path)
-            except OSError:
-                pass
-
-
-def _merge_parity_tp_image(fig_dir: str) -> None:
-    t_path = os.path.join(fig_dir, "parity_compare_T.png")
-    p_path = os.path.join(fig_dir, "parity_compare_P.png")
-    tp_path = os.path.join(fig_dir, "parity_compare_TP.png")
-
-    if not (os.path.exists(t_path) and os.path.exists(p_path)):
-        print("skip: parity_compare_TP merge missing source images")
-        return
-
-    _merge_two_images_vertically(t_path, p_path, tp_path)
-    print(f"saved: {tp_path}")
-
-
-def _merge_learning_curve_tp_image(fig_dir: str) -> None:
-    t_path = os.path.join(fig_dir, "learning_curve_T.png")
-    p_path = os.path.join(fig_dir, "learning_curve_P.png")
-    tp_path = os.path.join(fig_dir, "learning_curve_TP.png")
-
-    if not (os.path.exists(t_path) and os.path.exists(p_path)):
-        print("skip: learning_curve_TP merge missing source images")
-        return
-
-    _merge_two_images_horizontally(t_path, p_path, tp_path)
-    print(f"saved: {tp_path}")
-
-
-def _merge_residual_analysis_tp_image(fig_dir: str) -> None:
-    t_path = os.path.join(fig_dir, "residual_analysis_T.png")
-    p_path = os.path.join(fig_dir, "residual_analysis_P.png")
-    tp_path = os.path.join(fig_dir, "residual_analysis_TP.png")
-
-    if not (os.path.exists(t_path) and os.path.exists(p_path)):
-        print("skip: residual_analysis_TP merge missing source images")
-        return
-
-    _merge_two_images_vertically(t_path, p_path, tp_path)
-    print(f"saved: {tp_path}")
+            for path in (t_path, p_path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 
 def _merge_residual_analysis_quad(fig_dir: str) -> None:
@@ -387,12 +359,10 @@ def _merge_residual_analysis_quad(fig_dir: str) -> None:
     corr_p = os.path.join(fig_dir, "residual_analysis_corr_P.png")
     out_path = os.path.join(fig_dir, "residual_analysis_raw_corr_TP.png")
 
-    if not (os.path.exists(raw_t) and os.path.exists(raw_p) and os.path.exists(corr_t) and os.path.exists(corr_p)):
+    if not all(os.path.exists(p) for p in (raw_t, raw_p, corr_t, corr_p)):
         print("skip: residual_analysis_raw_corr_TP merge missing source images")
         return
 
-    # Build a 2x2 panel: [raw T | raw P] / [corr T | corr P]
-    import matplotlib.pyplot as plt
     import matplotlib.image as mpimg
 
     img_rt = mpimg.imread(raw_t)
@@ -560,15 +530,13 @@ def _plot_shap(exp_id: str,
             except Exception as e:
                 print(f"skip: SHAP failed for {exp_id}_{target}: {e}")
 
-    # Merge T/P SHAP plots into one TP image; removal of single-target files
-    # is controlled by the caller (set remove_single=False when a 2x2 merge
-    # will consume the individual panels afterwards).
     _merge_shap_tp_images(exp_id=exp_id, fig_dir=fig_dir, remove_single=remove_single)
 
 
 def _merge_shap_2x2(exp_id_liq: str,
                     exp_id_noliq: str,
                     fig_dir: str,
+                    out_stem: str = "Fig.5_SHAP_Analysis",
                     remove_panels: bool = True) -> None:
     """Compose a 2x2 SHAP figure: rows = Liquid / NoLiquid; cols = T / P."""
     import matplotlib.image as mpimg
@@ -623,13 +591,7 @@ def _merge_shap_2x2(exp_id_liq: str,
     plt.subplots_adjust(left=0.002, right=0.998, top=0.998, bottom=0.002,
                         wspace=0.01, hspace=0.01)
 
-    out_png = os.path.join(fig_dir, "Figure5_revised.png")
-    out_pdf = os.path.join(fig_dir, "Figure5_revised.pdf")
-    fig.savefig(out_png, dpi=300, bbox_inches='tight')
-    fig.savefig(out_pdf, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f"saved: {out_png}")
-    print(f"saved: {out_pdf}")
+    _save_paper_figure(fig, fig_dir, out_stem, dpi=300)
 
     if remove_panels:
         for p in paths.values():
@@ -646,7 +608,8 @@ def _plot_shap_figure5(exp_id_liq: str,
                        data_encoding: str = 'latin-1',
                        max_samples: int = 300,
                        bg_k: int = 50,
-                       force: bool = False) -> None:
+                       force: bool = False,
+                       out_stem: str = "Fig.5_SHAP_Analysis") -> None:
     """Plot SHAP for both Liquid and NoLiquid configs and assemble a 2x2 Figure 5."""
     exp_id_noliq = exp_id_liq.replace('_liq', '_noliq')
 
@@ -667,28 +630,29 @@ def _plot_shap_figure5(exp_id_liq: str,
         exp_id_liq=exp_id_liq,
         exp_id_noliq=exp_id_noliq,
         fig_dir=fig_dir,
+        out_stem=out_stem,
         remove_panels=True,
     )
 
 
-def _plot_correction_delta_scatter(results_dir: str, fig_dir: str, exp_id: str) -> None:
-    """Plot TP correction delta scatter (Pred_corr - Pred_raw)."""
+def _plot_correction_delta_scatter(results_dir: str, fig_dir: str, exp_id: str) -> Optional[plt.Figure]:
+    """Plot TP correction delta scatter. Returns fig for caller to save."""
     df_t = _load_predictions(results_dir, exp_id, "T")
     df_p = _load_predictions(results_dir, exp_id, "P")
     if df_t is None or df_p is None:
         print("skip: correction delta scatter missing T/P prediction files")
-        return
+        return None
 
     required_cols = {"y_true", "y_pred_raw", "y_pred_corr"}
     if not required_cols.issubset(df_t.columns):
         print(f"skip: correction delta scatter missing T columns for {exp_id}")
-        return
+        return None
     if not required_cols.issubset(df_p.columns):
         print(f"skip: correction delta scatter missing P columns for {exp_id}")
-        return
+        return None
 
     try:
-        fig = plot_correction_delta_scatter_tp(
+        return plot_correction_delta_scatter_tp(
             t_true=df_t["y_true"].values,
             t_pred_raw=df_t["y_pred_raw"].values,
             t_pred_corr=df_t["y_pred_corr"].values,
@@ -700,20 +664,9 @@ def _plot_correction_delta_scatter(results_dir: str, fig_dir: str, exp_id: str) 
             p_unit="kbar",
             bg_color="#ffffff",
         )
-        save_path = os.path.join(fig_dir, "correction_delta_scatter_TP.png")
-        fig.savefig(
-            save_path,
-            dpi=220,
-            bbox_inches='tight',
-            facecolor="#ffffff",
-            edgecolor="#ffffff",
-            transparent=False,
-        )
-        print(f"saved: {save_path}")
-
-        plt.close(fig)
     except Exception as e:
         print(f"skip: correction delta scatter error: {e}")
+        return None
 
 
 def _plot_sampling_bias_triptych(data_path: str,
@@ -721,21 +674,21 @@ def _plot_sampling_bias_triptych(data_path: str,
                                  data_encoding: str = "latin-1",
                                  grid_bins: int = 10,
                                  show_subplot_titles: bool = True,
-                                 show_suptitle: bool = False) -> None:
-    """Plot raw-data sampling-bias overview with two panels."""
+                                 show_suptitle: bool = False) -> Optional[plt.Figure]:
+    """Plot raw-data P-T distribution overview. Returns fig for caller to save."""
     if not os.path.exists(data_path):
         print(f"skip: missing data file for sampling bias figure: {data_path}")
-        return
+        return None
 
     try:
         df = pd.read_csv(data_path, encoding=data_encoding)
     except Exception as e:
         print(f"skip: failed to read data file for sampling bias figure: {e}")
-        return
+        return None
 
     if "T" not in df.columns or "P" not in df.columns:
         print("skip: sampling bias figure requires columns 'T' and 'P'")
-        return
+        return None
 
     y_t = pd.to_numeric(df["T"], errors="coerce").to_numpy()
     y_p = pd.to_numeric(df["P"], errors="coerce").to_numpy()
@@ -746,7 +699,7 @@ def _plot_sampling_bias_triptych(data_path: str,
     n_samples = y_t.size
     if n_samples == 0:
         print("skip: no valid T/P rows for sampling bias figure")
-        return
+        return None
 
     ratio_p_le_2p5 = float(np.mean(y_p <= 2.5))
     ratio_p_ge_20 = float(np.mean(y_p >= 20.0))
@@ -808,51 +761,43 @@ def _plot_sampling_bias_triptych(data_path: str,
         fig.suptitle(f"Raw Experimental Data Sampling Bias Overview (n={n_samples})", fontsize=14, y=1.02)
     plt.tight_layout()
 
-    out_path = os.path.join(fig_dir, "pt_sampling_bias_overview.png")
-    _save_any(fig, out_path)
-    print(f"saved: {out_path}")
+    return fig
 
 
 def _plot_importance(exp_id: str, results_dir: str, fig_dir: str, feature_names: Optional[List[str]] = None) -> None:
-    """Plot feature importance from saved model artifacts."""
+    """Plot feature importance from saved model artifacts (debug use)."""
     for target in ['T', 'P']:
         model_data = _load_model(results_dir, exp_id, target)
         if model_data is None:
             continue
-        
+
         model = model_data.get('model')
         model_module = model_data.get('model_module')
 
         if model is None:
             print(f"skip: model is None for {exp_id}_{target}")
             continue
-        
-        # Collect feature importance using model-specific fallbacks.
+
         importances = None
 
-        # Method 1: model_module.get_feature_importance(...)
         if model_module is not None and hasattr(model_module, 'get_feature_importance'):
             try:
                 importances = model_module.get_feature_importance(model)
             except Exception as e:
                 print(f"note: model_module.get_feature_importance failed for {exp_id}_{target}: {e}")
 
-        # Method 2: direct access from model object (e.g., sklearn/CatBoost).
         if importances is None:
             if hasattr(model, 'feature_importances_'):
                 importances = model.feature_importances_
             elif hasattr(model, 'get_feature_importance'):
-                # CatBoost-style API
                 try:
                     importances = model.get_feature_importance()
                 except Exception:
                     pass
 
-        # Method 3: for stacking dict models, average base-model importances.
         if importances is None and isinstance(model, dict):
             base_models = model.get('base', [])
             if base_models:
-                # Aggregate importances from all available base models.
                 imp_list = []
                 for bm in base_models:
                     if hasattr(bm, 'feature_importances_'):
@@ -868,15 +813,12 @@ def _plot_importance(exp_id: str, results_dir: str, fig_dir: str, feature_names:
         if importances is None:
             print(f"skip: cannot extract feature importance for {exp_id}_{target}")
             continue
-        
-        # Resolve feature names.
+
         names = feature_names
         if names is None:
-            # Method 1: map feature_set from saved config.
             config = model_data.get('config', {})
             feature_set = config.get('feature_set')
             if feature_set:
-                # Keep this mapping aligned with main.py config.
                 FEATURE_SETS = {
                     'NoLiquid': [
                         'SiO2.cpx', 'TiO2.cpx', 'Al2O3.cpx', 'Cr2O3.cpx',
@@ -891,13 +833,12 @@ def _plot_importance(exp_id: str, results_dir: str, fig_dir: str, feature_names:
                 }
                 names = FEATURE_SETS.get(feature_set)
         if names is None:
-            # Method 2: infer from serialized data_state.
             state = model_data.get('data_state')
             if state is not None and hasattr(state, 'feature_names'):
                 names = state.feature_names
         if names is None:
             names = [f"Feature_{i}" for i in range(len(importances))]
-        
+
         try:
             fig = plot_feature_importance(importances, names, target=target)
             _save_any(fig, os.path.join(fig_dir, f"{exp_id}_{target}_importance.png"))
@@ -912,21 +853,18 @@ def _plot_basic(exp_id: str, results_dir: str, fig_dir: str) -> None:
     if df_T is None or df_P is None:
         return
 
-    # Pred vs true
     fig = plot_pred_vs_true(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="°C")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_T_pred_vs_true.png"))
 
     fig = plot_pred_vs_true(df_P["y_true"], df_P["y_pred_corr"], target_name="P", unit="kbar")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_P_pred_vs_true.png"))
 
-    # Residuals
     fig = plot_residuals(df_T["y_true"], df_T["y_pred_corr"], target_name="T", unit="°C")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_T_residuals.png"))
 
     fig = plot_residuals(df_P["y_true"], df_P["y_pred_corr"], target_name="P", unit="kbar")
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_P_residuals.png"))
 
-    # Full report (T+P)
     fig = plot_full_report(
         df_T["y_true"], df_T["y_pred_corr"],
         df_P["y_true"], df_P["y_pred_corr"],
@@ -934,7 +872,6 @@ def _plot_basic(exp_id: str, results_dir: str, fig_dir: str) -> None:
     )
     _save_any(fig, os.path.join(fig_dir, f"{exp_id}_full_report.png"))
 
-    # Correction effect (requires raw/corr columns)
     if all(col in df_T.columns for col in ["y_true", "y_pred_raw", "y_pred_corr"]):
         df_corr_T = _prepare_correction_df(df_T, "T")
         fig = plot_correction_effect(df_corr_T, exp_name=exp_id, target="T")
@@ -951,11 +888,9 @@ def _plot_basic(exp_id: str, results_dir: str, fig_dir: str) -> None:
 
 
 def _plot_residual_compare(results_dir: str, fig_dir: str) -> None:
-    """Residual distribution comparison (E07 ERT vs E09 Stacking)."""
-    # Compare ERT vs Stacking under the Augmented setting.
     comp_map = {
-        "exp4_aug_corr": "E07_ert_augmented_none_liq",      # ERT (best setting)
-        "exp5_stacking": "E09_stacking_augmented_none_liq",  # Stacking
+        "exp4_aug_corr": "E07_ert_augmented_none_liq",
+        "exp5_stacking": "E09_stacking_augmented_none_liq",
     }
 
     def build_dict(target: str) -> Dict[str, pd.DataFrame]:
@@ -989,7 +924,6 @@ def _plot_residual_compare(results_dir: str, fig_dir: str) -> None:
 
 
 def _plot_feature_set_boxplot(results_dir: str, fig_dir: str) -> None:
-    """Figure 3-3: feature-set performance boxplot."""
     df = _load_metrics_summary(results_dir)
     if df is None:
         return
@@ -1002,16 +936,18 @@ def _plot_feature_set_boxplot(results_dir: str, fig_dir: str) -> None:
             print(f"skip: feature_set_boxplot_{target} error: {e}")
 
 
-def _plot_parity_compare(results_dir: str, fig_dir: str) -> None:
-    """Figure 3-4: parity comparison (NoLiquid vs Liquid)."""
-    # Load two E07 variants.
-    for target in ['T', 'P']:
+def _plot_parity_compare(results_dir: str, fig_dir: str) -> Optional[plt.Figure]:
+    """NoLiquid vs Liquid parity comparison. Returns vertically merged T/P fig."""
+    temp_t = os.path.join(fig_dir, "_tmp_parity_T.png")
+    temp_p = os.path.join(fig_dir, "_tmp_parity_P.png")
+
+    for target, temp_path in [("T", temp_t), ("P", temp_p)]:
         df_noliq = _load_predictions(results_dir, "E07_ert_augmented_none_noliq", target)
         df_liq = _load_predictions(results_dir, "E07_ert_augmented_none_liq", target)
 
         if df_noliq is None or df_liq is None:
             print(f"skip: parity_compare_{target} missing data")
-            continue
+            return None
 
         preds_noliq = {'y_true': df_noliq['y_true'].values, 'y_pred': df_noliq['y_pred_corr'].values}
         preds_liq = {'y_true': df_liq['y_true'].values, 'y_pred': df_liq['y_pred_corr'].values}
@@ -1024,84 +960,156 @@ def _plot_parity_compare(results_dir: str, fig_dir: str) -> None:
                 show_subplot_titles=True,
                 show_suptitle=False,
             )
-            _save_any(fig, os.path.join(fig_dir, f"parity_compare_{target}.png"))
+            fig.savefig(temp_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
         except Exception as e:
             print(f"skip: parity_compare_{target} error: {e}")
+            return None
 
-    _merge_parity_tp_image(fig_dir)
+    if not (os.path.exists(temp_t) and os.path.exists(temp_p)):
+        return None
+
+    merged_fig = _merge_two_images_vertically(temp_t, temp_p)
+    for p in (temp_t, temp_p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return merged_fig
 
 
-def _plot_stability(stability_exp_id: Optional[str], results_dir: str, fig_dir: str) -> None:
-    """Stability distribution figure from repeated experiments."""
+def _plot_stability(stability_exp_id: Optional[str], results_dir: str) -> Optional[plt.Figure]:
+    """Stability distribution figure. Returns fig for caller to save."""
     if not stability_exp_id:
-        return
+        return None
     df_T = _load_stability_metrics(results_dir, stability_exp_id, "T")
     df_P = _load_stability_metrics(results_dir, stability_exp_id, "P")
     if df_T is None or df_P is None:
-        return
+        return None
     try:
-        fig = plot_stability_overview(df_T, df_P, metrics=("rmse", "mae", "mbe"))
-        _save_any(fig, os.path.join(fig_dir, f"{stability_exp_id}_stability_overview.png"))
+        return plot_stability_overview(df_T, df_P, metrics=("rmse", "mae", "mbe"))
     except Exception as e:
         print(f"skip: stability overview error: {e}")
+        return None
 
 
-
-def _plot_learning_curve(learning_curve_dir: str, fig_dir: str) -> None:
-    """Learning-curve summary figure."""
+def _plot_learning_curve(learning_curve_dir: str, fig_dir: str) -> Optional[plt.Figure]:
+    """Learning-curve summary figure. Returns horizontally merged T+P fig."""
     summary_df = _load_learning_curve_summary(learning_curve_dir)
     if summary_df is None:
-        return
-    for target in ["T", "P"]:
+        return None
+
+    temp_t = os.path.join(fig_dir, "_tmp_lc_T.png")
+    temp_p = os.path.join(fig_dir, "_tmp_lc_P.png")
+
+    for target, temp_path in [("T", temp_t), ("P", temp_p)]:
         try:
             fig = plot_learning_curve(summary_df, target=target)
-            _save_any(fig, os.path.join(fig_dir, f"learning_curve_{target}.png"))
+            fig.savefig(temp_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
         except Exception as e:
             print(f"skip: learning curve {target} error: {e}")
+            return None
 
-    _merge_learning_curve_tp_image(fig_dir)
+    if not (os.path.exists(temp_t) and os.path.exists(temp_p)):
+        return None
+
+    merged_fig = _merge_two_images_horizontally(temp_t, temp_p)
+    for p in (temp_t, temp_p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return merged_fig
 
 
-def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> None:
-    """Figure 3-2: P-T grid stratified CV diagram."""
+def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Optional[plt.Figure]:
+    """P-T grid stratified CV diagram. Returns fig for caller to save."""
     try:
         from src.splitters import compute_pt_edges, assign_pt_bins
 
-        # Load data.
         df = pd.read_csv(data_path, encoding='latin-1')
         y_T = df['T'].values
         y_P = df['P'].values
 
-        # Compute P-T bins.
         pt_bins = compute_pt_edges(y_T, y_P)
         tp_labels = assign_pt_bins(y_T, y_P, pt_bins)
 
-        # Merge sparse bins to make stratified CV feasible.
         n_splits = 10
         merged_labels = _merge_sparse_bins(tp_labels, min_samples_per_bin=n_splits)
 
-        # Check the minimum bin count and downgrade n_splits if needed.
         _, bin_counts = np.unique(merged_labels, return_counts=True)
-        effective_n_splits = min(n_splits, bin_counts.min())
-        effective_n_splits = max(2, effective_n_splits)
+        effective_n_splits = max(2, min(n_splits, bin_counts.min()))
 
-        # Generate fold assignments.
         skf = StratifiedKFold(n_splits=effective_n_splits, shuffle=True, random_state=random_seed)
         fold_assignments = np.zeros(len(y_T), dtype=int)
         for fold_id, (_, val_idx) in enumerate(skf.split(y_T, merged_labels)):
             fold_assignments[val_idx] = fold_id
 
-        # Plot using raw tp_labels for display while folds come from merged labels.
         fig = plot_pt_grid_cv_splits(
             y_T, y_P, tp_labels, fold_assignments,
             pt_bins.p_edges, pt_bins.t_edges,
             show_title=False,
         )
-        _save_any(fig, os.path.join(fig_dir, "pt_grid_cv_splits.png"))
         if effective_n_splits < 10:
             print(f"note: P-T CV figure uses {effective_n_splits} folds after sparse-bin merge")
+        return fig
     except Exception as e:
         print(f"skip: pt_grid_cv_splits error: {e}")
+        return None
+
+
+def _run_paper_mode(args, fig_dir: str, base_config: dict) -> None:
+    """Generate all paper figures (Fig. 1, 3-8) with standardised PNG+PDF output."""
+
+    # Fig. 1 — P-T distribution of raw dataset
+    fig = _plot_sampling_bias_triptych(
+        data_path=args.data_path,
+        fig_dir=fig_dir,
+        data_encoding=base_config.get("data_encoding", "latin-1"),
+    )
+    if fig is not None:
+        _save_paper_figure(fig, fig_dir, "Fig.1_PT_Distribution")
+
+    # Fig. 3 — P-T grid-stratified CV
+    fig = _plot_pt_grid_cv(args.data_path, fig_dir)
+    if fig is not None:
+        _save_paper_figure(fig, fig_dir, "Fig.3_PT_Grid_CV")
+
+    # Fig. 4 — NoLiquid vs Liquid parity comparison
+    fig = _plot_parity_compare(args.results_dir, fig_dir)
+    if fig is not None:
+        _save_paper_figure(fig, fig_dir, "Fig.4_Parity_Comparison")
+
+    # Fig. 5 — SHAP 2x2 (disk-based pipeline, saves PNG+PDF internally)
+    _plot_shap_figure5(
+        exp_id_liq=args.exp_id,
+        results_dir=args.results_dir,
+        fig_dir=fig_dir,
+        data_path=args.data_path,
+        data_encoding=base_config.get("data_encoding", "latin-1"),
+        max_samples=DEFAULT_SHAP_MAX_SAMPLES,
+        bg_k=DEFAULT_SHAP_BG_K,
+        force=DEFAULT_SHAP_FORCE,
+        out_stem="Fig.5_SHAP_Analysis",
+    )
+
+    # Fig. 6 — Stability error distributions
+    fig = _plot_stability(args.stability_exp_id, args.results_dir)
+    if fig is not None:
+        _save_paper_figure(fig, fig_dir, "Fig.6_Stability")
+
+    # Fig. 7 — Learning curves
+    fig = _plot_learning_curve(args.learning_curve_dir, fig_dir)
+    if fig is not None:
+        _save_paper_figure(fig, fig_dir, "Fig.7_Learning_Curves")
+
+    # Fig. 8 — Correction delta scatter
+    fig = _plot_correction_delta_scatter(args.results_dir, fig_dir, args.correction_delta_exp_id)
+    if fig is not None:
+        _save_paper_figure(fig, fig_dir, "Fig.8_Correction_Delta")
+
+    print(f"\nPaper figures saved under {fig_dir}")
 
 
 def main() -> int:
@@ -1115,76 +1123,25 @@ def main() -> int:
     parser.add_argument("--learning-curve-dir",
                         default=os.path.join(base_config["output_dir"], "learning_curve"))
     parser.add_argument("--correction-delta-exp-id", default="E10_ert_augmented_segmented_liq")
-    parser.add_argument("--selected-only", action="store_true",
-                        help="Generate only the retained figure set.")
+    parser.add_argument("--debug", action="store_true",
+                        help="Also generate diagnostic plots in addition to paper figures.")
     args = parser.parse_args()
 
     fig_dir = os.path.join(args.results_dir, args.fig_subdir)
     _ensure_dir(fig_dir)
 
-    if args.selected_only:
-        _plot_sampling_bias_triptych(
-            data_path=args.data_path,
-            fig_dir=fig_dir,
-            data_encoding=base_config.get("data_encoding", "latin-1"),
-        )
-        _plot_parity_compare(args.results_dir, fig_dir)
-        _plot_learning_curve(args.learning_curve_dir, fig_dir)
+    _run_paper_mode(args, fig_dir, base_config)
 
-        _plot_shap_figure5(
-            exp_id_liq=args.exp_id,
-            results_dir=args.results_dir,
-            fig_dir=fig_dir,
-            data_path=args.data_path,
-            data_encoding=base_config.get("data_encoding", "latin-1"),
-            max_samples=DEFAULT_SHAP_MAX_SAMPLES,
-            bg_k=DEFAULT_SHAP_BG_K,
-            force=DEFAULT_SHAP_FORCE,
-        )
+    if args.debug:
+        _plot_basic(args.exp_id, args.results_dir, fig_dir)
+        _plot_importance(args.exp_id, args.results_dir, fig_dir)
+        _plot_residual_compare(args.results_dir, fig_dir)
+        _plot_feature_set_boxplot(args.results_dir, fig_dir)
+        print(f"Debug figures saved under {fig_dir}")
 
-        _plot_correction_delta_scatter(args.results_dir, fig_dir, args.correction_delta_exp_id)
-
-        # Keep only requested final outputs from parity/learning merge paths.
-        for fname in ["parity_compare_T.png", "parity_compare_P.png", "learning_curve_T.png", "learning_curve_P.png"]:
-            fpath = os.path.join(fig_dir, fname)
-            if os.path.exists(fpath):
-                try:
-                    os.remove(fpath)
-                except OSError:
-                    pass
-
-        print(f"plots saved under {fig_dir}")
-        return 0
-
-    _plot_basic(args.exp_id, args.results_dir, fig_dir)
-    _plot_importance(args.exp_id, args.results_dir, fig_dir)
-
-    _plot_pt_grid_cv(args.data_path, fig_dir)
-    _plot_feature_set_boxplot(args.results_dir, fig_dir)
-    _plot_parity_compare(args.results_dir, fig_dir)
-    _plot_residual_compare(args.results_dir, fig_dir)
-    _plot_stability(args.stability_exp_id, args.results_dir, fig_dir)
-    _plot_learning_curve(args.learning_curve_dir, fig_dir)
-
-    _plot_sampling_bias_triptych(
-        data_path=args.data_path,
-        fig_dir=fig_dir,
-        data_encoding=base_config.get("data_encoding", "latin-1"),
-    )
-    _plot_correction_delta_scatter(args.results_dir, fig_dir, args.correction_delta_exp_id)
-    _plot_shap_figure5(
-        exp_id_liq=args.exp_id,
-        results_dir=args.results_dir,
-        fig_dir=fig_dir,
-        data_path=args.data_path,
-        data_encoding=base_config.get("data_encoding", "latin-1"),
-        max_samples=DEFAULT_SHAP_MAX_SAMPLES,
-        bg_k=DEFAULT_SHAP_BG_K,
-        force=DEFAULT_SHAP_FORCE,
-    )
-
-    print(f"plots saved under {fig_dir}")
     return 0
+
+
 if __name__ == "__main__":
     def _init_logging():
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
