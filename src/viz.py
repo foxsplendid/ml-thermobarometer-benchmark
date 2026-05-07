@@ -656,6 +656,11 @@ def plot_combined_shap_summary(shap_values: Any,
     if show_suptitle:
         plt.suptitle(f"SHAP Analysis for {title_name}", fontsize=font_size + 2, y=0.98)
 
+    # axes_box: [left, bottom, width, height] in figure-fraction units.
+    # Chosen to keep y-axis tick labels and the right-side colorbar fully
+    # within the figure boundary regardless of feature count.
+    axes_box = [0.18, 0.08, 0.60, 0.84]
+
     shap_lib.summary_plot(
         shap_values,
         x_df,
@@ -665,11 +670,10 @@ def plot_combined_shap_summary(shap_values: Any,
         show=False,
         color_bar=show_colorbar,
     )
-    plt.gca().set_position([0.5, 0.5, 0.65, 0.65])
     ax1 = plt.gca()
+    ax1.set_position(axes_box)
 
     ax2 = ax1.twiny()
-    _ = ax2
     shap_lib.summary_plot(
         shap_values,
         x_df,
@@ -678,8 +682,8 @@ def plot_combined_shap_summary(shap_values: Any,
         max_display=max_display,
         show=False,
     )
-    plt.gca().set_position([0.5, 0.5, 0.65, 0.65])
     ax2 = plt.gca()
+    # twiny shares the y-axis bbox; set_position is inherited — no second call needed.
 
     for bar in ax2.patches:
         bar.set_alpha(alpha)
@@ -694,11 +698,8 @@ def plot_combined_shap_summary(shap_values: Any,
     ax2.xaxis.set_label_position('top')
     ax2.xaxis.tick_top()
 
-    plt.tight_layout()
-    if show_suptitle:
-        plt.subplots_adjust(top=0.92)
-    else:
-        plt.subplots_adjust(top=0.96)
+    top = 0.92 if show_suptitle else 0.96
+    plt.subplots_adjust(top=top)
     return fig
 
 
