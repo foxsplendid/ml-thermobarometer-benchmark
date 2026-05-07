@@ -21,7 +21,7 @@ if PROJECT_ROOT not in sys.path:
 # ============================================================
 # ============================================================
 from config import get_config_dict
-from src.experiment_params import build_model_params, build_data_params
+from src.experiment_params import BASE_CONFIGS, build_exp_id, build_model_params, build_data_params
 from src.logger import setup_logging, get_logger
 
 CONFIG = get_config_dict()
@@ -34,36 +34,10 @@ def get_experiment_configs():
     """get_experiment_configs function."""
     from src.protocol import ExperimentConfig
 
-    base_configs = [
-        {'data': 'raw', 'model': 'ert', 'corr': 'none'},
-        {'data': 'raw', 'model': 'catboost', 'corr': 'none'},
-        {'data': 'raw', 'model': 'stacking', 'corr': 'none'},
-
-        # E04: Balanced + ERT + None
-        {'data': 'balanced', 'model': 'ert', 'corr': 'none'},
-        # E05: Balanced + CatBoost + None
-        {'data': 'balanced', 'model': 'catboost', 'corr': 'none'},
-        # E06: Balanced + Stacking + None
-        {'data': 'balanced', 'model': 'stacking', 'corr': 'none'},
-
-        {'data': 'augmented', 'model': 'ert', 'corr': 'none'},
-        # E08: Augmented + CatBoost + None
-        {'data': 'augmented', 'model': 'catboost', 'corr': 'none'},
-        {'data': 'augmented', 'model': 'stacking', 'corr': 'none'},
-
-        # E10: Augmented + ERT + Segmented
-        {'data': 'augmented', 'model': 'ert', 'corr': 'segmented'},
-        # E11: Augmented + CatBoost + Segmented
-        {'data': 'augmented', 'model': 'catboost', 'corr': 'segmented'},
-        # E12: Augmented + Stacking + Segmented
-        {'data': 'augmented', 'model': 'stacking', 'corr': 'segmented'},
-    ]
-
     final_configs = []
-    for idx, base in enumerate(base_configs, start=1):
+    for base in BASE_CONFIGS:
         for fset in ['NoLiquid', 'Liquid']:
-            suffix = 'noliq' if fset == 'NoLiquid' else 'liq'
-            exp_id = f"E{idx:02d}_{base['model']}_{base['data']}_{base['corr']}_{suffix}"
+            exp_id = build_exp_id(base['data'], base['model'], base['corr'], fset)
             final_configs.append(ExperimentConfig(
                 exp_id=exp_id,
                 data_module_name=base['data'],

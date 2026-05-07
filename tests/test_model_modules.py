@@ -9,7 +9,8 @@ from src.model_modules import (
     RandomForestModel,
     StrictOOFStacking,
     RidgeModel,
-    get_model_module
+    get_model_module,
+    _CATBOOST_DEFAULTS,
 )
 
 
@@ -239,4 +240,14 @@ class TestGetModelModule:
         """test_invalid_name function."""
         with pytest.raises(ValueError):
             get_model_module('invalid_model')
+
+    def test_catboost_defaults_match_config(self):
+        """Ensure _CATBOOST_DEFAULTS stays in sync with config.yml model_defaults.catboost."""
+        from config import get_config_dict
+        cfg = get_config_dict()["model_defaults"]["catboost"]
+        for key in ("iterations", "depth", "learning_rate", "loss_function"):
+            assert cfg[key] == _CATBOOST_DEFAULTS[key], (
+                f"config.yml and _CATBOOST_DEFAULTS diverged at '{key}': "
+                f"config={cfg[key]!r}, code={_CATBOOST_DEFAULTS[key]!r}"
+            )
 

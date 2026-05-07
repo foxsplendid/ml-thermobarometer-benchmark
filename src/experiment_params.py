@@ -1,7 +1,34 @@
 # -*- coding: utf-8 -*-
 """Shared helpers for building experiment parameter dictionaries."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+# ============================================================
+# Single source of truth for the E01-E12 experiment matrix.
+# main.py:get_experiment_configs() iterates this list;
+# build_exp_id() derives its lookup index from it.
+# Adding or reordering an entry here automatically updates both.
+# ============================================================
+BASE_CONFIGS: List[Dict[str, str]] = [
+    {'data': 'raw',       'model': 'ert',      'corr': 'none'},
+    {'data': 'raw',       'model': 'catboost',  'corr': 'none'},
+    {'data': 'raw',       'model': 'stacking',  'corr': 'none'},
+    {'data': 'balanced',  'model': 'ert',      'corr': 'none'},
+    {'data': 'balanced',  'model': 'catboost',  'corr': 'none'},
+    {'data': 'balanced',  'model': 'stacking',  'corr': 'none'},
+    {'data': 'augmented', 'model': 'ert',      'corr': 'none'},
+    {'data': 'augmented', 'model': 'catboost',  'corr': 'none'},
+    {'data': 'augmented', 'model': 'stacking',  'corr': 'none'},
+    {'data': 'augmented', 'model': 'ert',      'corr': 'segmented'},
+    {'data': 'augmented', 'model': 'catboost',  'corr': 'segmented'},
+    {'data': 'augmented', 'model': 'stacking',  'corr': 'segmented'},
+]
+
+# (data, corr, model) → 1-based experiment number, derived from BASE_CONFIGS
+_EXP_INDEX: Dict[tuple, int] = {
+    (c['data'], c['corr'], c['model']): i
+    for i, c in enumerate(BASE_CONFIGS, 1)
+}
 
 
 def build_exp_id(
@@ -12,37 +39,17 @@ def build_exp_id(
 ) -> str:
     """Derive a canonical experiment ID from the four config axes.
 
-    Follows the E01-E12 numbering scheme used in the benchmark paper:
-      E01-E03: raw  + ert/catboost/stacking + none
-      E04-E06: balanced + ert/catboost/stacking + none
-      E07-E09: augmented + ert/catboost/stacking + none
-      E10-E12: augmented + ert/catboost/stacking + segmented
+    Numbering follows BASE_CONFIGS order (E01-E12 for the benchmark paper).
+    Unrecognised combinations fall back to a descriptive non-numbered id.
     """
-    _model_offset = {
-        "ert": 0, "extratrees": 0,
-        "rf": 0, "randomforest": 0,
-        "catboost": 1, "cb": 1,
-        "stacking": 2,
-    }
-    _data_base = {
-        ("raw",       "none"):      1,
-        ("balanced",  "none"):      4,
-        ("augmented", "none"):      7,
-        ("augmented", "segmented"): 10,
-    }
-
     dm = data_module.lower()
     mm = model_module.lower()
     cm = corr_module.lower()
-
-    base = _data_base.get((dm, cm))
-    if base is None:
-        # Unrecognised combination — fall back to a descriptive id.
-        suffix = "noliq" if feature_set == "NoLiquid" else "liq"
-        return f"{dm}_{mm}_{cm}_{suffix}"
-
-    exp_num = base + _model_offset.get(mm, 0)
     suffix = "noliq" if feature_set == "NoLiquid" else "liq"
+
+    exp_num = _EXP_INDEX.get((dm, cm, mm))
+    if exp_num is None:
+        return f"{dm}_{mm}_{cm}_{suffix}"
     return f"E{exp_num:02d}_{mm}_{dm}_{cm}_{suffix}"
 
 

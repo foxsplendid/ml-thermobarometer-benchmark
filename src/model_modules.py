@@ -101,18 +101,33 @@ class ExtraTreesModel(ModelModule):
 # ============================================================
 # ============================================================
 
+# Single source of truth for CatBoost standalone defaults.
+# build_model_params() reads from config.yml for experiment runs;
+# these values apply only when CatBoostModel() is called directly.
+# Keep in sync with config.yml model_defaults.catboost —
+# test_catboost_defaults_match_config() asserts they match.
+_CATBOOST_DEFAULTS: Dict[str, Any] = {
+    "iterations": 1000,
+    "depth": 6,
+    "learning_rate": 0.03,
+    "loss_function": "RMSE",
+    "task_type": "auto",
+    "gpu_devices": "0",
+}
+
+
 class CatBoostModel(ModelModule):
     """CatBoostModel class."""
-    
+
     def __init__(self,
-                 iterations: int = 1000,
-                 depth: int = 6,
-                 learning_rate: float = 0.03,
-                 loss_function: str = 'RMSE',
+                 iterations: int = _CATBOOST_DEFAULTS["iterations"],
+                 depth: int = _CATBOOST_DEFAULTS["depth"],
+                 learning_rate: float = _CATBOOST_DEFAULTS["learning_rate"],
+                 loss_function: str = _CATBOOST_DEFAULTS["loss_function"],
                  random_seed: int = 42,
                  silent: bool = True,
-                 task_type: str = 'auto',
-                 gpu_devices: str = '0',
+                 task_type: str = _CATBOOST_DEFAULTS["task_type"],
+                 gpu_devices: str = _CATBOOST_DEFAULTS["gpu_devices"],
                  **kwargs):
         gpu_params = _get_catboost_task_type(task_type, gpu_devices)
 
