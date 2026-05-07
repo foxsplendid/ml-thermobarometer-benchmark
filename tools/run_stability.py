@@ -63,7 +63,25 @@ def _collect_segment_files(stability_dir: str, exp_id: str, target: str) -> list
     pattern = os.path.join(stability_dir, f"{exp_id}_{target}_test_metrics_rep_*.csv")
     return sorted(glob.glob(pattern))
 
-def _merge_stability_segments(merge_dir: str, output_dir: str, exp_id: str, verbose: bool = True) -> None:
+def _check_repeat_completeness(merged: pd.DataFrame, target: str, n_repeats: int, verbose: bool) -> None:
+    if "repeat_id" not in merged.columns or n_repeats <= 0:
+        return
+    expected = set(range(n_repeats))
+    actual = set(merged["repeat_id"].dropna().astype(int).tolist())
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    if missing and verbose:
+        print(f"  WARNING [{target}]: {len(missing)} missing repeat_ids: {missing[:20]}"
+              + (" ..." if len(missing) > 20 else ""))
+    if extra and verbose:
+        print(f"  WARNING [{target}]: {len(extra)} unexpected repeat_ids: {extra[:20]}"
+              + (" ..." if len(extra) > 20 else ""))
+    if not missing and not extra and verbose:
+        print(f"  {target}: all {n_repeats} repeat_ids present")
+
+
+def _merge_stability_segments(merge_dir: str, output_dir: str, exp_id: str,
+                               n_repeats: int = 0, verbose: bool = True) -> None:
     stability_dir = _resolve_stability_dir(merge_dir)
     out_stability_dir = _resolve_stability_dir(output_dir)
     _ensure_dir(out_stability_dir)
@@ -85,6 +103,8 @@ def _merge_stability_segments(merge_dir: str, output_dir: str, exp_id: str, verb
             after = len(merged)
             if verbose and after != before:
                 print(f"  {target}: dropped {before - after} duplicated rows by repeat_id")
+
+        _check_repeat_completeness(merged, target, n_repeats, verbose)
 
         merged_path = os.path.join(out_stability_dir, f"{exp_id}_{target}_test_metrics.csv")
         merged.to_csv(merged_path, index=False)
@@ -195,9 +215,6 @@ Examples:
     parser.add_argument("--resume", action="store_true",
                         help="resume from latest checkpoint/test_metrics")
 
-    # skip options
-    parser.add_argument("--skip-stability", action="store_true", help="skip stability test")
-
     args = parser.parse_args()
 
     if (args.repeat_start is None) ^ (args.repeat_end is None):
@@ -237,7 +254,8 @@ Examples:
         print("=" * 70)
         print(f"  merge_dir: {args.merge_dir}")
         print(f"  output_dir: {args.output_dir}")
-        _merge_stability_segments(args.merge_dir, args.output_dir, args.exp_id, verbose=True)
+        _merge_stability_segments(args.merge_dir, args.output_dir, args.exp_id,
+                                   n_repeats=args.n_repeats, verbose=True)
         return 0
 
     load_config = BASE_CONFIG.copy()
@@ -264,28 +282,27 @@ Examples:
     _ensure_dir(args.output_dir)
 
     start = time.time()
-    
-    if not args.skip_stability:
-        if segmented:
-            print(f"\nRunning stability segment: {repeat_start}-{repeat_end}")
-        else:
-            print(f"\nRunning stability repeats: {args.n_repeats}")
-        _run_stability(
-            config,
-            X_train, y_T_train, y_P_train, tp_bins_train,
-            X_test, y_T_test, y_P_test,
-            args.output_dir,
-            args.n_splits,
-            args.n_repeats,
-            repeat_start,
-            repeat_end,
-            segment_tag,
-            (not segmented),
-            args.stability_test_size,
-            args.checkpoint_interval,
-            args.random_seed,
-            args.resume,
-        )
+
+    if segmented:
+        print(f"\nRunning stability segment: {repeat_start}-{repeat_end}")
+    else:
+        print(f"\nRunning stability repeats: {args.n_repeats}")
+    _run_stability(
+        config,
+        X_train, y_T_train, y_P_train, tp_bins_train,
+        X_test, y_T_test, y_P_test,
+        args.output_dir,
+        args.n_splits,
+        args.n_repeats,
+        repeat_start,
+        repeat_end,
+        segment_tag,
+        (not segmented),
+        args.stability_test_size,
+        args.checkpoint_interval,
+        args.random_seed,
+        args.resume,
+    )
 
     elapsed = time.time() - start
     print(f"\nDone. Elapsed: {elapsed:.1f}s")

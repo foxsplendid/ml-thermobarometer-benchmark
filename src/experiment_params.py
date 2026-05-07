@@ -4,6 +4,48 @@
 from typing import Any, Dict, Optional
 
 
+def build_exp_id(
+    data_module: str,
+    model_module: str,
+    corr_module: str,
+    feature_set: str,
+) -> str:
+    """Derive a canonical experiment ID from the four config axes.
+
+    Follows the E01-E12 numbering scheme used in the benchmark paper:
+      E01-E03: raw  + ert/catboost/stacking + none
+      E04-E06: balanced + ert/catboost/stacking + none
+      E07-E09: augmented + ert/catboost/stacking + none
+      E10-E12: augmented + ert/catboost/stacking + segmented
+    """
+    _model_offset = {
+        "ert": 0, "extratrees": 0,
+        "rf": 0, "randomforest": 0,
+        "catboost": 1, "cb": 1,
+        "stacking": 2,
+    }
+    _data_base = {
+        ("raw",       "none"):      1,
+        ("balanced",  "none"):      4,
+        ("augmented", "none"):      7,
+        ("augmented", "segmented"): 10,
+    }
+
+    dm = data_module.lower()
+    mm = model_module.lower()
+    cm = corr_module.lower()
+
+    base = _data_base.get((dm, cm))
+    if base is None:
+        # Unrecognised combination — fall back to a descriptive id.
+        suffix = "noliq" if feature_set == "NoLiquid" else "liq"
+        return f"{dm}_{mm}_{cm}_{suffix}"
+
+    exp_num = base + _model_offset.get(mm, 0)
+    suffix = "noliq" if feature_set == "NoLiquid" else "liq"
+    return f"E{exp_num:02d}_{mm}_{dm}_{cm}_{suffix}"
+
+
 def build_model_params(
     base_config: Dict[str, Any],
     model_module: str,

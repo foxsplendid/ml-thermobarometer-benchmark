@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -21,7 +22,7 @@ from main import load_data, prepare_splits
 from src.data_modules import get_data_module
 from src.model_modules import get_model_module
 from src.correction_modules import get_correction_module
-from src.experiment_params import build_data_params, build_model_params
+from src.experiment_params import build_data_params, build_model_params, build_exp_id
 from src.protocol import (
     ExperimentConfig,
     Pipeline,
@@ -233,23 +234,31 @@ def _run_error_propagation(
         target_seed = _derive_target_seed(random_seed, tag)
         mc_seed_target = _derive_target_seed(mc_seed, tag)
 
-        data_params = dict(config.data_params)
-        model_params = dict(config.model_params)
-        data_params["random_seed"] = target_seed
-        model_params["random_seed"] = target_seed
-
-        data_mod = get_data_module(config.data_module_name, **data_params)
-        model_mod = get_model_module(config.model_module_name, **model_params)
-        corr_mod = get_correction_module(config.corr_module_name)
-        pipeline = Pipeline(data_mod, model_mod, corr_mod)
-        pipeline.fit(X_train, y_train)
-
-        if config.corr_module_name != "none":
-            y_pred_train_raw = pipeline.predict_from_raw_input(X_train, apply_correction=False)
-            corr_model = corr_mod.fit(y_train, y_pred_train_raw)
-            pipeline.set_correction(corr_mod, corr_model)
+        cache_path = os.path.join(ep_dir, f"{config.exp_id}_ep_pipeline_{tag}.joblib")
+        if os.path.exists(cache_path):
+            logger.info(f"[{tag}] loading cached pipeline from {os.path.basename(cache_path)}")
+            pipeline = joblib.load(cache_path)
         else:
-            pipeline.set_correction(corr_mod, None)
+            data_params = dict(config.data_params)
+            model_params = dict(config.model_params)
+            data_params["random_seed"] = target_seed
+            model_params["random_seed"] = target_seed
+
+            data_mod = get_data_module(config.data_module_name, **data_params)
+            model_mod = get_model_module(config.model_module_name, **model_params)
+            corr_mod = get_correction_module(config.corr_module_name)
+            pipeline = Pipeline(data_mod, model_mod, corr_mod)
+            pipeline.fit(X_train, y_train)
+
+            if config.corr_module_name != "none":
+                y_pred_train_raw = pipeline.predict_from_raw_input(X_train, apply_correction=False)
+                corr_model = corr_mod.fit(y_train, y_pred_train_raw)
+                pipeline.set_correction(corr_mod, corr_model)
+            else:
+                pipeline.set_correction(corr_mod, None)
+
+            joblib.dump(pipeline, cache_path)
+            logger.info(f"[{tag}] pipeline cached to {os.path.basename(cache_path)}")
 
         y_pred_base_raw = pipeline.predict_from_raw_input(X_mc, apply_correction=False)
         y_pred_base = pipeline.predict_from_raw_input(X_mc, apply_correction=True)
@@ -377,27 +386,13 @@ Output:
 
     args = parser.parse_args()
 
-    # E01-E03: raw + ert/catboost/stacking + none
-    # E04-E06: balanced + ert/catboost/stacking + none
-    # E07-E09: augmented + ert/catboost/stacking + none
-    # E10-E12: augmented + ert/catboost/stacking + segmented
     if args.exp_id is None:
-        data_module = args.data_module.lower()
-        model_module = args.model_module.lower()
-
-        model_offset = {'ert': 0, 'extratrees': 0, 'catboost': 1, 'rf': 0, 'randomforest': 0, 'stacking': 2}
-        offset = model_offset.get(model_module, 0)
-
-        data_base_none = {'raw': 1, 'balanced': 4, 'augmented': 7}
-        if args.corr_module.lower() == "segmented" and data_module == "augmented":
-            base_num = 10
-        else:
-            base_num = data_base_none.get(data_module, 7)
-
-        exp_num = base_num + offset
-        suffix = 'noliq' if args.feature_set == 'NoLiquid' else 'liq'
-        corr_tag = args.corr_module.lower()
-        exp_id = f"E{exp_num:02d}_{model_module}_{data_module}_{corr_tag}_{suffix}"
+        exp_id = build_exp_id(
+            data_module=args.data_module,
+            model_module=args.model_module,
+            corr_module=args.corr_module,
+            feature_set=args.feature_set,
+        )
     else:
         exp_id = args.exp_id
 

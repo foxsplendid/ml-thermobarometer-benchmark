@@ -475,9 +475,6 @@ Examples:
     parser.add_argument('--checkpoint-interval', type=int, default=20,
                         help='Checkpoint interval (default: save every 20 tasks)')
 
-    parser.add_argument('--no-plot', action='store_true',
-                        help='Plot generation is handled by tools/plot_offline_figures.py')
-
     args = parser.parse_args()
 
     if (args.repeat_start is None) ^ (args.repeat_end is None):
