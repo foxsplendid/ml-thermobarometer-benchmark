@@ -453,20 +453,28 @@ def plot_pt_marginal_kde_folds(
     """
     from scipy.stats import gaussian_kde
 
+    # Colors match Fig. 8 (plot_correction_delta_scatter_tp): T=orange, P=blue.
+    T_COLOR = "#d95f02"
+    P_COLOR = "#2c7fb8"
+    FOLD_COLOR = "#aaaaaa"
+
     n_folds = int(fold_assignments.max()) + 1
-    fold_color = "#aaaaaa"
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
+    # Pressure values below 0 are physically impossible; clip for display.
+    p_plot = np.clip(y_p, 0.0, None)
+
     specs = [
-        (axes[0], y_t, fold_assignments, "Temperature T (°C)"),
-        (axes[1], y_p, fold_assignments, "Pressure P (kbar)"),
+        (axes[0], y_t,   fold_assignments, "Temperature T (°C)", T_COLOR, None),
+        (axes[1], p_plot, fold_assignments, "Pressure P (kbar)",  P_COLOR, 0.0),
     ]
 
-    for ax, values, folds, xlabel in specs:
+    for ax, values, folds, xlabel, ref_color, x_min in specs:
         v_min, v_max = values.min(), values.max()
         margin = (v_max - v_min) * 0.05
-        grid = np.linspace(v_min - margin, v_max + margin, 500)
+        x_lo = x_min if x_min is not None else v_min - margin
+        grid = np.linspace(x_lo, v_max + margin, 500)
 
         # Shared bandwidth keeps per-fold and all-data peak heights comparable.
         kde_all = gaussian_kde(values, bw_method="scott")
@@ -478,12 +486,13 @@ def plot_pt_marginal_kde_folds(
             if mask.sum() < 2:
                 continue
             kde = gaussian_kde(values[mask], bw_method=shared_bw)
-            line, = ax.plot(grid, kde(grid), color=fold_color, lw=1.0, alpha=0.8)
+            line, = ax.plot(grid, kde(grid), color=FOLD_COLOR, lw=1.0, alpha=0.8)
             if fold_line is None:
                 fold_line = line
 
-        all_line, = ax.plot(grid, kde_all(grid), color="#111111", lw=2.5)
+        all_line, = ax.plot(grid, kde_all(grid), color=ref_color, lw=2.5)
 
+        ax.set_xlim(left=x_lo)
         ax.set_xlabel(xlabel, fontsize=11)
         ax.set_ylabel("Density", fontsize=11)
         ax.set_ylim(bottom=0)
