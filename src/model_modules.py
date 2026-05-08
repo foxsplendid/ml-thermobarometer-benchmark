@@ -17,9 +17,10 @@ from .interfaces import ModelModule
 def _get_default_n_jobs() -> int:
     """Return the default n_jobs for sklearn parallel estimators.
 
-    读取环境变量 ``ML_N_JOBS``（整数）以允许外部并行脚本精确控制每个模型
-    占用的线程数，避免多实验并发时线程过度竞争。
-    未设置时默认 -1（使用全部逻辑核心）。
+    Reads the ``ML_N_JOBS`` environment variable (integer) to allow external
+    parallel scripts to control per-model thread usage and avoid thread
+    contention when running multiple experiments concurrently.
+    Defaults to -1 (use all logical cores) when unset.
     """
     env_val = os.environ.get('ML_N_JOBS')
     if env_val is not None:
@@ -27,7 +28,7 @@ def _get_default_n_jobs() -> int:
             return int(env_val)
         except ValueError:
             pass
-    return -1  # 使用全部可用核心（移除原 Windows 限制）
+    return -1  # use all available cores
 
 
 def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> Dict[str, Any]:
@@ -224,7 +225,7 @@ class RandomForestModel(ModelModule):
 # ============================================================
 # ============================================================
 
-# 模型键到构造器的注册表，供 StrictOOFStacking 动态构建基学习器使用
+# Registry mapping model keys to constructors, used by StrictOOFStacking to build base learners dynamically.
 def _build_base_model_registry(random_seed: int) -> Dict[str, Any]:
     """_build_base_model_registry function."""
     return {

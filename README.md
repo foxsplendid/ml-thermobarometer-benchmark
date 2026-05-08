@@ -20,7 +20,7 @@ This project builds and evaluates machine-learning thermobarometer models under 
 - `M3 CorrectionModule`: `none` / `segmented`
 - `M4 UncertaintyModule`: `MCUncertaintyEstimator`
 
-### 3.2 Main Experiment Matrix
+### 2.2 Main Experiment Matrix
 The main benchmark includes 24 experiments = 12 base configurations x 2 feature sets:
 
 - `E01-E03`: `raw` + (`ert`/`catboost`/`stacking`) + `none`
@@ -86,6 +86,8 @@ ml-thermobarometer-benchmark/
 
 ## 1. Environment Setup
 
+Python >= 3.9 is recommended.
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -142,7 +144,7 @@ python tools/run_error_propagation.py --exp-id E07_ert_augmented_none_liq --mode
 
 ### 3.4 Offline Plotting 
 ```bash
-python tools/plot_offline_figures.py --selected-only
+python tools/plot_offline_figures.py
 ```
 
 Notes:
