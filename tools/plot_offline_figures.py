@@ -1024,7 +1024,7 @@ def _plot_learning_curve(learning_curve_dir: str, fig_dir: str) -> Optional[plt.
 
 
 def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Optional[plt.Figure]:
-    """P-T grid stratified CV diagram. Returns fig for caller to save."""
+    """Fig. 3 — marginal KDE comparison confirming each CV fold covers the full P-T range."""
     try:
         from src.splitters import compute_pt_edges, assign_pt_bins
 
@@ -1054,7 +1054,7 @@ def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Opt
             print(f"note: P-T CV figure uses {effective_n_splits} folds after sparse-bin merge")
         return fig
     except Exception as e:
-        print(f"skip: pt_grid_cv_splits error: {e}")
+        print(f"skip: pt_marginal_kde_folds error: {e}")
         return None
 
 
