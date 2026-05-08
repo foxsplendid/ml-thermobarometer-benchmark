@@ -728,7 +728,7 @@ def _plot_sampling_bias_triptych(data_path: str,
     axes[0].set_ylabel("Pressure P (kbar)")
     if show_subplot_titles:
         axes[0].set_title("a) P-T Density (Hexbin, log scale)")
-    axes[0].legend(loc="upper right", fontsize=8, frameon=True)
+    axes[0].legend(loc="upper left", fontsize=8, frameon=True)
     cbar0 = fig.colorbar(hb, ax=axes[0], shrink=0.9)
     cbar0.set_label("Samples per hex (log)")
 
@@ -748,12 +748,12 @@ def _plot_sampling_bias_triptych(data_path: str,
     cdf_ax.set_ylim(0.0, 1.02)
     cdf_ax.set_ylabel("Cumulative fraction")
     axes[1].text(
-        0.03, 0.97,
+        0.97, 0.10,
         f"P <= 2.5: {ratio_p_le_2p5 * 100:.1f}%\nP >= 20: {ratio_p_ge_20 * 100:.1f}%",
         transform=axes[1].transAxes,
         fontsize=9,
-        va="top",
-        ha="left",
+        va="bottom",
+        ha="right",
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
     )
 
