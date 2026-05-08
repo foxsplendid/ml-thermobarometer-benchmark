@@ -437,6 +437,340 @@ def plot_residual_distribution_comparison(results_dict: Dict[str, pd.DataFrame],
 # ============================================================
 # ============================================================
 
+def plot_pt_marginal_cv_folds(
+    y_t: np.ndarray,
+    y_p: np.ndarray,
+    fold_assignments: np.ndarray,
+    save_path: Optional[str] = None,
+    figsize: Tuple[int, int] = (9, 3.5),
+    show_title: bool = True,
+) -> plt.Figure:
+    """Plot T and P marginal KDE distributions, one curve per fold overlaid on the full-data curve.
+
+    Each fold is shown as a thin semi-transparent line; the full dataset is shown as a thick
+    dark reference line.  Identical fold shapes across the full range confirm that grid-stratified
+    splitting gives every fold representative P-T coverage.
+    """
+    from scipy.stats import gaussian_kde
+
+    n_folds = int(fold_assignments.max()) + 1
+    fold_color = "#888888"
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    panels = [
+        (axes[0], y_t, "Temperature  T  (°C)",  "T"),
+        (axes[1], y_p, "Pressure  P  (kbar)", "P"),
+    ]
+
+    for ax, values, xlabel, _label in panels:
+        v_min, v_max = values.min(), values.max()
+        margin = (v_max - v_min) * 0.05
+        grid = np.linspace(v_min - margin, v_max + margin, 400)
+
+        # one thin line per fold
+        fold_handle = None
+        for fold_id in range(n_folds):
+            mask = fold_assignments == fold_id
+            kde = gaussian_kde(values[mask], bw_method="scott")
+            line, = ax.plot(grid, kde(grid), color=fold_color,
+                            lw=0.9, alpha=0.55)
+            if fold_id == 0:
+                fold_handle = line
+
+        # thick reference line for full dataset
+        kde_all = gaussian_kde(values, bw_method="scott")
+        all_handle, = ax.plot(grid, kde_all(grid), color="#1a1a1a", lw=2.2)
+
+        ax.set_xlabel(xlabel, fontsize=11)
+        ax.set_ylabel("Density", fontsize=11)
+        ax.set_xlim(grid[0], grid[-1])
+        ax.set_ylim(bottom=0)
+        ax.tick_params(labelsize=9)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+    axes[0].legend(
+        [fold_handle, all_handle],
+        [f"Individual fold  (n={n_folds})", "All data"],
+        fontsize=9, frameon=False,
+    )
+
+    if show_title:
+        fig.suptitle("Marginal T / P Distributions per CV Fold", fontsize=12, y=1.02)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Figure saved: {save_path}")
+
+    return fig
+
+
+# ============================================================
+# ============================================================
+
+def plot_pt_marginal_kde_folds(
+    y_t: np.ndarray,
+    y_p: np.ndarray,
+    fold_assignments: np.ndarray,
+    save_path: Optional[str] = None,
+    figsize: Tuple[int, int] = (10, 4),
+    p_max: Optional[float] = None,
+) -> plt.Figure:
+    """Two-panel marginal KDE figure for P-T grid-stratified CV validation.
+
+    Left panel: T (°C) distribution.  Right panel: P (kbar) distribution.
+    Each panel overlays one KDE curve per fold (tab10 palette, thin) plus a
+    thick black curve for the full dataset.  If the 10 per-fold curves all
+    track the black reference, the stratification is confirmed at a glance.
+
+    p_max: if given, the P panel is restricted to samples with P <= p_max.
+    """
+    from scipy.stats import gaussian_kde
+    import matplotlib.cm as mplcm
+
+    n_folds = int(fold_assignments.max()) + 1
+    fold_cmap = mplcm.get_cmap("tab10", n_folds)
+    fold_colors = [fold_cmap(i) for i in range(n_folds)]
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    # Apply P ceiling filter for the pressure panel
+    if p_max is not None:
+        p_mask = y_p <= p_max
+        y_p_plot = y_p[p_mask]
+        fold_p = fold_assignments[p_mask]
+        p_xlabel = f"Pressure  P  (kbar,  ≤ {p_max:.0f})"
+    else:
+        y_p_plot = y_p
+        fold_p = fold_assignments
+        p_xlabel = "Pressure  P  (kbar)"
+
+    specs = [
+        (axes[0], y_t, fold_assignments, "Temperature T (°C)", None),
+        (axes[1], y_p_plot, fold_p, p_xlabel, 0.0),
+    ]
+
+    fold_line = None
+    all_line = None
+    for ax, values, folds, xlabel, x_min in specs:
+        v_min, v_max = values.min(), values.max()
+        margin = (v_max - v_min) * 0.05
+        x_lo = (x_min if x_min is not None else v_min - margin)
+        grid = np.linspace(x_lo, v_max + margin, 500)
+
+        # Use a shared bandwidth (computed from all data) so that per-fold
+        # and all-data KDE curves are directly comparable in peak height.
+        kde_all = gaussian_kde(values, bw_method="scott")
+        shared_bw = kde_all.factor
+
+        for fold_id in range(n_folds):
+            mask = folds == fold_id
+            if mask.sum() < 2:
+                continue
+            kde = gaussian_kde(values[mask], bw_method=shared_bw)
+            line, = ax.plot(grid, kde(grid),
+                            color=fold_colors[fold_id], lw=1.0, alpha=0.65)
+            if fold_line is None:
+                fold_line = line
+
+        all_line, = ax.plot(grid, kde_all(grid), color="#111111", lw=2.5)
+
+        ax.set_xlim(left=x_lo)
+        ax.set_xlabel(xlabel, fontsize=11)
+        ax.set_ylabel("Density", fontsize=11)
+        ax.set_ylim(bottom=0)
+        ax.tick_params(labelsize=9)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+    if fold_line is not None and all_line is not None:
+        axes[0].legend(
+            [fold_line, all_line],
+            [f"Fold  (n = {n_folds})", "All data"],
+            fontsize=9, frameon=False, loc="upper right",
+        )
+
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Figure saved: {save_path}")
+
+    return fig
+
+
+# ============================================================
+# ============================================================
+
+def plot_pt_coverage_composite(
+    y_t: np.ndarray,
+    y_p: np.ndarray,
+    fold_assignments: np.ndarray,
+    t_edges: np.ndarray,
+    p_edges: np.ndarray,
+    save_path: Optional[str] = None,
+    figsize: Tuple[int, int] = (9, 8),
+    show_title: bool = True,
+) -> plt.Figure:
+    """Composite P-T coverage figure: 2-D occupancy heatmap (centre) with
+    T marginal KDE strip on top and P marginal KDE strip on the right.
+
+    Central heatmap cell colour = number of folds that have at least one
+    sample in that P-T bin, proving spatial coverage across all folds.
+    Marginal strips show per-fold KDE curves (tab10) against a thick black
+    full-dataset reference, confirming 1-D distributional consistency.
+    """
+    from scipy.stats import gaussian_kde
+    from matplotlib.gridspec import GridSpec
+    from matplotlib.colors import BoundaryNorm
+    import matplotlib.cm as mplcm
+
+    n_folds = int(fold_assignments.max()) + 1
+    fold_cmap = mplcm.get_cmap("tab10", n_folds)
+    fold_colors = [fold_cmap(i) for i in range(n_folds)]
+
+    n_t_bins = len(t_edges) - 1
+    n_p_bins = len(p_edges) - 1
+
+    # --- build occupancy grid: count distinct folds per cell ---------------
+    occupancy = np.zeros((n_p_bins, n_t_bins), dtype=int)
+    t_idx = np.clip(np.searchsorted(t_edges[1:-1], y_t, side="right"), 0, n_t_bins - 1)
+    p_idx = np.clip(np.searchsorted(p_edges[1:-1], y_p, side="right"), 0, n_p_bins - 1)
+    for fold_id in range(n_folds):
+        mask = fold_assignments == fold_id
+        for ti, pi in zip(t_idx[mask], p_idx[mask]):
+            occupancy[pi, ti] = min(occupancy[pi, ti] + 1, n_folds)
+
+    # --- figure layout -----------------------------------------------------
+    fig = plt.figure(figsize=figsize)
+    gs = GridSpec(
+        2, 2,
+        figure=fig,
+        width_ratios=[4, 1],
+        height_ratios=[1, 4],
+        hspace=0.04,
+        wspace=0.04,
+    )
+    ax_top   = fig.add_subplot(gs[0, 0])           # T marginal
+    ax_main  = fig.add_subplot(gs[1, 0],
+                               sharex=ax_top)       # 2-D heatmap
+    ax_right = fig.add_subplot(gs[1, 1],
+                               sharey=ax_main)      # P marginal
+    ax_cbar  = fig.add_subplot(gs[0, 1])            # colorbar
+
+    t_centres = 0.5 * (t_edges[:-1] + t_edges[1:])
+    p_centres = 0.5 * (p_edges[:-1] + p_edges[1:])
+
+    # --- main: occupancy heatmap -------------------------------------------
+    empty_color = "#d0d0d0"
+    levels = np.arange(0, n_folds + 2) - 0.5          # boundaries between integers
+    norm   = BoundaryNorm(levels, ncolors=256)
+    base_cmap = mplcm.get_cmap("Blues")
+
+    # draw empty cells first
+    ax_main.pcolormesh(
+        t_edges, p_edges,
+        np.where(occupancy == 0, np.nan, np.nan),  # placeholder; real fill below
+        color=empty_color,
+    )
+    # full grid background for empty cells
+    ax_main.set_facecolor(empty_color)
+
+    # occupied cells
+    masked = np.ma.masked_where(occupancy == 0, occupancy)
+    hm = ax_main.pcolormesh(
+        t_edges, p_edges, masked,
+        cmap=base_cmap, norm=norm,
+        rasterized=True,
+    )
+
+    ax_main.set_xlabel("Temperature  T  (°C)", fontsize=11)
+    ax_main.set_ylabel("Pressure  P  (kbar)",  fontsize=11)
+    ax_main.tick_params(labelsize=9)
+
+    # --- colorbar (top-right cell) -----------------------------------------
+    cb = fig.colorbar(hm, cax=ax_cbar, orientation="vertical")
+    cb.set_label("Folds present", fontsize=9)
+    cb.set_ticks(range(0, n_folds + 1, max(1, n_folds // 5)))
+    cb.ax.tick_params(labelsize=8)
+
+    # --- top: T marginal KDE -----------------------------------------------
+    t_min, t_max = t_edges[0], t_edges[-1]
+    margin_t = (t_max - t_min) * 0.04
+    t_grid = np.linspace(t_min - margin_t, t_max + margin_t, 400)
+
+    fold_handle = None
+    for fold_id in range(n_folds):
+        mask = fold_assignments == fold_id
+        kde = gaussian_kde(y_t[mask], bw_method="scott")
+        line, = ax_top.plot(t_grid, kde(t_grid),
+                            color=fold_colors[fold_id], lw=1.0, alpha=0.75)
+        if fold_id == 0:
+            fold_handle = line
+
+    kde_all_t = gaussian_kde(y_t, bw_method="scott")
+    all_handle_t, = ax_top.plot(t_grid, kde_all_t(t_grid),
+                                color="#1a1a1a", lw=2.2)
+
+    ax_top.set_ylabel("Density", fontsize=9)
+    ax_top.set_ylim(bottom=0)
+    ax_top.tick_params(labelsize=8)
+    plt.setp(ax_top.get_xticklabels(), visible=False)
+    for spine in ("top", "right"):
+        ax_top.spines[spine].set_visible(False)
+
+    ax_top.legend(
+        [fold_handle, all_handle_t],
+        [f"Fold  (n={n_folds})", "All data"],
+        fontsize=8, frameon=False, loc="upper right",
+    )
+
+    # --- right: P marginal KDE (horizontal) --------------------------------
+    p_min, p_max = p_edges[0], p_edges[-1]
+    margin_p = (p_max - p_min) * 0.04
+    p_grid = np.linspace(p_min - margin_p, p_max + margin_p, 400)
+
+    for fold_id in range(n_folds):
+        mask = fold_assignments == fold_id
+        kde = gaussian_kde(y_p[mask], bw_method="scott")
+        ax_right.plot(kde(p_grid), p_grid,
+                      color=fold_colors[fold_id], lw=1.0, alpha=0.75)
+
+    kde_all_p = gaussian_kde(y_p, bw_method="scott")
+    ax_right.plot(kde_all_p(p_grid), p_grid, color="#1a1a1a", lw=2.2)
+
+    ax_right.set_xlabel("Density", fontsize=9)
+    ax_right.set_xlim(left=0)
+    ax_right.tick_params(labelsize=8)
+    plt.setp(ax_right.get_yticklabels(), visible=False)
+    for spine in ("top", "right"):
+        ax_right.spines[spine].set_visible(False)
+
+    # --- axis range alignment ----------------------------------------------
+    ax_main.set_xlim(t_edges[0], t_edges[-1])
+    ax_main.set_ylim(p_edges[0], p_edges[-1])
+
+    if show_title:
+        fig.suptitle(
+            "P–T Space Coverage and Fold Distribution Consistency",
+            fontsize=12, y=1.01,
+        )
+
+    fig.align_ylabels([ax_top, ax_main])
+
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Figure saved: {save_path}")
+
+    return fig
+
+
+# ============================================================
+# ============================================================
+
 def plot_pt_grid_cv_splits(y_t: np.ndarray,
                            y_p: np.ndarray,
                            tp_bins: np.ndarray,

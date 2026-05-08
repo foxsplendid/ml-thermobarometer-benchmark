@@ -40,7 +40,7 @@ from src.viz import (
     plot_stability_overview,
     plot_combined_shap_summary,
     save_figure,
-    plot_pt_grid_cv_splits,
+    plot_pt_marginal_kde_folds,
     plot_feature_set_comparison_boxplot,
     plot_parity_comparison,
 )
@@ -1046,10 +1046,9 @@ def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Opt
         for fold_id, (_, val_idx) in enumerate(skf.split(y_T, merged_labels)):
             fold_assignments[val_idx] = fold_id
 
-        fig = plot_pt_grid_cv_splits(
-            y_T, y_P, tp_labels, fold_assignments,
-            pt_bins.p_edges, pt_bins.t_edges,
-            show_title=False,
+        fig = plot_pt_marginal_kde_folds(
+            y_T, y_P, fold_assignments,
+            p_max=5.0,
         )
         if effective_n_splits < 10:
             print(f"note: P-T CV figure uses {effective_n_splits} folds after sparse-bin merge")
