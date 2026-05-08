@@ -1046,10 +1046,7 @@ def _plot_pt_grid_cv(data_path: str, fig_dir: str, random_seed: int = 42) -> Opt
         for fold_id, (_, val_idx) in enumerate(skf.split(y_T, merged_labels)):
             fold_assignments[val_idx] = fold_id
 
-        fig = plot_pt_marginal_kde_folds(
-            y_T, y_P, fold_assignments,
-            p_max=5.0,
-        )
+        fig = plot_pt_marginal_kde_folds(y_T, y_P, fold_assignments)
         if effective_n_splits < 10:
             print(f"note: P-T CV figure uses {effective_n_splits} folds after sparse-bin merge")
         return fig

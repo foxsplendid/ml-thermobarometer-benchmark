@@ -443,68 +443,47 @@ def plot_pt_marginal_kde_folds(
     fold_assignments: np.ndarray,
     save_path: Optional[str] = None,
     figsize: Tuple[int, int] = (10, 4),
-    p_max: Optional[float] = None,
 ) -> plt.Figure:
     """Two-panel marginal KDE figure for P-T grid-stratified CV validation.
 
     Left panel: T (°C) distribution.  Right panel: P (kbar) distribution.
-    Each panel overlays one KDE curve per fold (tab10 palette, thin) plus a
-    thick black curve for the full dataset.  If the 10 per-fold curves all
-    track the black reference, the stratification is confirmed at a glance.
-
-    p_max: if given, the P panel is restricted to samples with P <= p_max.
+    Each panel overlays one thin light-gray KDE curve per fold plus a thick
+    black curve for the full dataset.  Identical fold shapes confirm that
+    grid-stratified splitting gives every fold representative P-T coverage.
     """
     from scipy.stats import gaussian_kde
-    import matplotlib.cm as mplcm
 
     n_folds = int(fold_assignments.max()) + 1
-    fold_cmap = mplcm.get_cmap("tab10", n_folds)
-    fold_colors = [fold_cmap(i) for i in range(n_folds)]
+    fold_color = "#aaaaaa"
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
-    # Apply P ceiling filter for the pressure panel
-    if p_max is not None:
-        p_mask = y_p <= p_max
-        y_p_plot = y_p[p_mask]
-        fold_p = fold_assignments[p_mask]
-        p_xlabel = f"Pressure  P  (kbar,  ≤ {p_max:.0f})"
-    else:
-        y_p_plot = y_p
-        fold_p = fold_assignments
-        p_xlabel = "Pressure  P  (kbar)"
-
     specs = [
-        (axes[0], y_t, fold_assignments, "Temperature T (°C)", None),
-        (axes[1], y_p_plot, fold_p, p_xlabel, 0.0),
+        (axes[0], y_t, fold_assignments, "Temperature T (°C)"),
+        (axes[1], y_p, fold_assignments, "Pressure P (kbar)"),
     ]
 
-    fold_line = None
-    all_line = None
-    for ax, values, folds, xlabel, x_min in specs:
+    for ax, values, folds, xlabel in specs:
         v_min, v_max = values.min(), values.max()
         margin = (v_max - v_min) * 0.05
-        x_lo = (x_min if x_min is not None else v_min - margin)
-        grid = np.linspace(x_lo, v_max + margin, 500)
+        grid = np.linspace(v_min - margin, v_max + margin, 500)
 
-        # Use a shared bandwidth (computed from all data) so that per-fold
-        # and all-data KDE curves are directly comparable in peak height.
+        # Shared bandwidth keeps per-fold and all-data peak heights comparable.
         kde_all = gaussian_kde(values, bw_method="scott")
         shared_bw = kde_all.factor
 
+        fold_line = None
         for fold_id in range(n_folds):
             mask = folds == fold_id
             if mask.sum() < 2:
                 continue
             kde = gaussian_kde(values[mask], bw_method=shared_bw)
-            line, = ax.plot(grid, kde(grid),
-                            color=fold_colors[fold_id], lw=1.0, alpha=0.65)
+            line, = ax.plot(grid, kde(grid), color=fold_color, lw=1.0, alpha=0.8)
             if fold_line is None:
                 fold_line = line
 
         all_line, = ax.plot(grid, kde_all(grid), color="#111111", lw=2.5)
 
-        ax.set_xlim(left=x_lo)
         ax.set_xlabel(xlabel, fontsize=11)
         ax.set_ylabel("Density", fontsize=11)
         ax.set_ylim(bottom=0)
@@ -512,12 +491,12 @@ def plot_pt_marginal_kde_folds(
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
 
-    if fold_line is not None and all_line is not None:
-        axes[0].legend(
-            [fold_line, all_line],
-            [f"Fold  (n = {n_folds})", "All data"],
-            fontsize=9, frameon=False, loc="upper right",
-        )
+        if fold_line is not None:
+            ax.legend(
+                [fold_line, all_line],
+                [f"Fold (n = {n_folds})", "All data"],
+                fontsize=9, frameon=False, loc="upper right",
+            )
 
     fig.tight_layout()
 
