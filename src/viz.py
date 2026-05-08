@@ -10,11 +10,6 @@ import seaborn as sns
 import shap as shap_lib
 
 
-def _check_plotting_available():
-    """_check_plotting_available function."""
-    return None
-
-
 # ============================================================
 # ============================================================
 
@@ -26,7 +21,6 @@ def plot_pred_vs_true(y_true: np.ndarray, y_pred: np.ndarray,
                       show_metrics: bool = True,
                       alpha: float = 0.5) -> plt.Axes:
     """plot_pred_vs_true function."""
-    _check_plotting_available()
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -158,7 +152,6 @@ def plot_stability_overview(stability_T: pd.DataFrame,
                             figsize: Tuple[int, int] = (12, 10),
                             title: Optional[str] = None) -> plt.Figure:
     """plot_stability_overview function."""
-    _check_plotting_available()
 
     unit_map = {"T": "℃", "P": "kbar"}
     colors = {"T": "#1f77b4", "P": "#ff7f0e"}
@@ -223,7 +216,6 @@ def plot_learning_curve(summary_df: pd.DataFrame,
                         target: str = "T",
                         figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
     """plot_learning_curve function."""
-    _check_plotting_available()
 
     df = summary_df[summary_df["target"] == target].copy()
     if df.empty:
@@ -623,7 +615,6 @@ def plot_combined_shap_summary(shap_values: Any,
                                show_suptitle: bool = True,
                                show_bottom_axis_labels: bool = True) -> plt.Figure:
     """Draw a combined SHAP dot-and-bar summary figure."""
-    _check_plotting_available()
 
     if isinstance(X, pd.DataFrame):
         x_df = X.copy()
@@ -718,7 +709,6 @@ def plot_correction_delta_scatter_tp(t_true: np.ndarray,
     Plot correction-delta figure with joint panels for T/P.
     Layout and styling follow the provided reference implementation.
     """
-    _check_plotting_available()
 
     t_true = np.asarray(t_true).ravel()
     t_pred_raw = np.asarray(t_pred_raw).ravel()
