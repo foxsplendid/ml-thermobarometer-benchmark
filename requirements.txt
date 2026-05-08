@@ -1,4 +1,3 @@
-# Core scientific stack — exact versions used during development and paper submission
 # Install with: pip install -r requirements.txt
 numpy==1.26.4
 pandas==2.2.3
