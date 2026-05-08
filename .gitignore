@@ -110,6 +110,7 @@ desktop.ini
 figure/
 
 # ============================================================
-# Learning curve checkpoint files (intermediate outputs)
+# Intermediate checkpoint files (learning curve and stability)
 # ============================================================
 results/learning_curve/learning_curve_checkpoint*.csv
+results/stability/*_checkpoint_*.csv
