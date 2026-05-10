@@ -154,7 +154,7 @@ def plot_stability_overview(stability_T: pd.DataFrame,
     """plot_stability_overview function."""
 
     unit_map = {"T": "℃", "P": "kbar"}
-    colors = {"T": "#1f77b4", "P": "#ff7f0e"}
+    colors = {"T": "#d95f02", "P": "#2c7fb8"}
     unitless = {"r2", "slope", "bins_merged", "n_splits_requested", "n_splits_used",
                 "n_bins_raw", "n_bins_merged", "repeat_id"}
 
@@ -189,7 +189,8 @@ def plot_stability_overview(stability_T: pd.DataFrame,
             ax.axvline(mean_val, color="black", linestyle="--", linewidth=1.2)
 
             label = _metric_label(metric, unit)
-            ax.set_title(f"{target_name} {label}")
+            letter = chr(ord('a') + row * 2 + col)
+            ax.set_title(f"{letter}) {target_name} {label}")
             ax.set_xlabel(label)
             ax.set_ylabel("Density")
             ax.text(
@@ -244,7 +245,10 @@ def plot_learning_curve(summary_df: pd.DataFrame,
     ax.set_xlabel("Training Samples", fontsize=12)
     ylabel = "RMSE (°C)" if target == "T" else "RMSE (kbar)"
     ax.set_ylabel(ylabel, fontsize=12)
-    title = f"Learning Curve - {'Temperature' if target == 'T' else 'Pressure'}"
+    if target == 'T':
+        title = "a) Learning Curve — Temperature"
+    else:
+        title = "b) Learning Curve — Pressure"
     ax.set_title(title, fontsize=14)
     ax.legend(loc="upper right", fontsize=10)
     ax.grid(True, alpha=0.3)
@@ -507,6 +511,9 @@ def plot_pt_marginal_kde_folds(
                 fontsize=9, frameon=False, loc="upper right",
             )
 
+    axes[0].set_title("a) Temperature")
+    axes[1].set_title("b) Pressure")
+
     fig.tight_layout()
 
     if save_path:
@@ -599,36 +606,43 @@ def plot_parity_comparison(preds_noliq: Dict[str, np.ndarray],
     margin = (lims[1] - lims[0]) * 0.05
     lims = [lims[0] - margin, lims[1] + margin]
 
-    ax1.scatter(preds_noliq['y_true'], preds_noliq['y_pred'], alpha=0.4, s=15, color='#ff7f0e', edgecolors='none')
+    scatter_color = '#d95f02' if target == 'T' else '#2c7fb8'
+    ax1.scatter(preds_noliq['y_true'], preds_noliq['y_pred'], alpha=0.4, s=15, color=scatter_color, edgecolors='none')
     ax1.plot(lims, lims, 'r--', linewidth=2, label='1:1 line')
     ax1.set_xlim(lims)
     ax1.set_ylim(lims)
     ax1.set_xlabel(f'{target} True ({unit})', fontsize=11)
     ax1.set_ylabel(f'{target} Predicted ({unit})', fontsize=11)
     if show_subplot_titles:
-        ax1.set_title(f'NoLiquid (9 features)', fontsize=12, fontweight='bold')
+        if target == 'T':
+            ax1.set_title('a) NoLiquid — Temperature', fontsize=12, fontweight='bold')
+        else:
+            ax1.set_title('c) NoLiquid — Pressure', fontsize=12, fontweight='bold')
     ax1.set_aspect('equal')
     rmse_noliq = rmse(preds_noliq['y_true'], preds_noliq['y_pred'])
     r2_noliq = r2(preds_noliq['y_true'], preds_noliq['y_pred'])
     ax1.text(0.05, 0.95, f'RMSE = {rmse_noliq:.1f} {unit}\nR² = {r2_noliq:.3f}',
              transform=ax1.transAxes, fontsize=10, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     ax1.legend(loc='lower right')
 
-    ax2.scatter(preds_liq['y_true'], preds_liq['y_pred'], alpha=0.4, s=15, color='#1f77b4', edgecolors='none')
+    ax2.scatter(preds_liq['y_true'], preds_liq['y_pred'], alpha=0.4, s=15, color=scatter_color, edgecolors='none')
     ax2.plot(lims, lims, 'r--', linewidth=2, label='1:1 line')
     ax2.set_xlim(lims)
     ax2.set_ylim(lims)
     ax2.set_xlabel(f'{target} True ({unit})', fontsize=11)
     ax2.set_ylabel(f'{target} Predicted ({unit})', fontsize=11)
     if show_subplot_titles:
-        ax2.set_title(f'Liquid (18 features)', fontsize=12, fontweight='bold')
+        if target == 'T':
+            ax2.set_title('b) Liquid — Temperature', fontsize=12, fontweight='bold')
+        else:
+            ax2.set_title('d) Liquid — Pressure', fontsize=12, fontweight='bold')
     ax2.set_aspect('equal')
     rmse_liq = rmse(preds_liq['y_true'], preds_liq['y_pred'])
     r2_liq = r2(preds_liq['y_true'], preds_liq['y_pred'])
     ax2.text(0.05, 0.95, f'RMSE = {rmse_liq:.1f} {unit}\nR² = {r2_liq:.3f}',
              transform=ax2.transAxes, fontsize=10, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     ax2.legend(loc='lower right')
 
     if show_suptitle:
@@ -650,7 +664,8 @@ def plot_combined_shap_summary(shap_values: Any,
                                figsize: Tuple[int, int] = (12, 10),
                                font_size: int = 12,
                                show_suptitle: bool = True,
-                               show_bottom_axis_labels: bool = True) -> plt.Figure:
+                               show_bottom_axis_labels: bool = True,
+                               panel_title: Optional[str] = None) -> plt.Figure:
     """Draw a combined SHAP dot-and-bar summary figure."""
 
     if isinstance(X, pd.DataFrame):
@@ -685,9 +700,11 @@ def plot_combined_shap_summary(shap_values: Any,
         plt.suptitle(f"SHAP Analysis for {title_name}", fontsize=font_size + 2, y=0.98)
 
     # axes_box: [left, bottom, width, height] in figure-fraction units.
-    # Chosen to keep y-axis tick labels and the right-side colorbar fully
-    # within the figure boundary regardless of feature count.
-    axes_box = [0.18, 0.08, 0.60, 0.84]
+    # bottom=0.08 keeps y-axis tick labels visible; width=0.60 leaves room for
+    # the right-side colorbar. Height and suptitle y are computed after SHAP
+    # auto-resizes the figure so the top margin is always a fixed number of
+    # inches regardless of feature count (see below).
+    bottom_frac = 0.08
 
     shap_lib.summary_plot(
         shap_values,
@@ -697,8 +714,29 @@ def plot_combined_shap_summary(shap_values: Any,
         max_display=max_display,
         show=False,
         color_bar=show_colorbar,
+        plot_size="auto",
     )
     ax1 = plt.gca()
+
+    # After SHAP auto-resizes the figure, compute layout in absolute inches so
+    # the top margin is the same physical size for both tall and short panels.
+    fig = plt.gcf()
+    fig_h = fig.get_size_inches()[1]
+
+    if panel_title:
+        # Reserve 1.0" at top: bar xlabel (~0.25") + gap (~0.45") +
+        # suptitle (~0.20") + top padding (~0.10").
+        top_reserve_in = 1.00
+        axes_top_frac = 1.0 - top_reserve_in / fig_h
+        axes_h = axes_top_frac - bottom_frac
+        axes_h = max(axes_h, 0.50)
+        suptitle_y = 1.0 - 0.12 / fig_h
+        plt.suptitle(panel_title, fontsize=font_size + 2, y=suptitle_y)
+    else:
+        axes_h = 0.84
+        axes_top_frac = bottom_frac + axes_h  # 0.92
+
+    axes_box = [0.18, bottom_frac, 0.60, axes_h]
     ax1.set_position(axes_box)
 
     ax2 = ax1.twiny()
@@ -709,6 +747,7 @@ def plot_combined_shap_summary(shap_values: Any,
         feature_names=x_df.columns,
         max_display=max_display,
         show=False,
+        plot_size="auto",
     )
     ax2 = plt.gca()
     # twiny shares the y-axis bbox; set_position is inherited — no second call needed.
@@ -726,7 +765,7 @@ def plot_combined_shap_summary(shap_values: Any,
     ax2.xaxis.set_label_position('top')
     ax2.xaxis.tick_top()
 
-    top = 0.92 if show_suptitle else 0.96
+    top = 0.92 if show_suptitle else axes_top_frac
     plt.subplots_adjust(top=top)
     return fig
 
@@ -830,7 +869,8 @@ def plot_correction_delta_scatter_tp(t_true: np.ndarray,
                           legend_loc="upper left",
                           stat_pos=(0.98, 0.04),
                           stat_ha="right",
-                          stat_va="bottom"):
+                          stat_va="bottom",
+                          panel_title=None):
         inner = GridSpecFromSubplotSpec(
             2, 2,
             subplot_spec=spec,
@@ -847,6 +887,9 @@ def plot_correction_delta_scatter_tp(t_true: np.ndarray,
 
         for ax in (ax_top, ax_main, ax_right):
             ax.set_facecolor(bg_color)
+
+        if panel_title:
+            ax_top.set_title(panel_title, pad=0)
 
         ax_main.scatter(x_true, y_delta, s=18, alpha=0.35, color=base_color,
                         edgecolors="white", linewidths=0.2)
@@ -919,7 +962,7 @@ def plot_correction_delta_scatter_tp(t_true: np.ndarray,
         "axes.spines.right": False,
     }):
         fig = plt.figure(figsize=figsize, constrained_layout=False, facecolor=bg_color)
-        outer = GridSpec(2, 1, figure=fig, hspace=0.26)
+        outer = GridSpec(2, 1, figure=fig, hspace=0.14)
 
         _draw_joint_block(
             fig,
@@ -934,6 +977,7 @@ def plot_correction_delta_scatter_tp(t_true: np.ndarray,
             stat_pos=(0.98, 0.04),
             stat_ha="right",
             stat_va="bottom",
+            panel_title="a) Temperature correction",
         )
 
         _draw_joint_block(
@@ -949,6 +993,7 @@ def plot_correction_delta_scatter_tp(t_true: np.ndarray,
             stat_pos=(0.76, 0.06),
             stat_ha="right",
             stat_va="bottom",
+            panel_title="b) Pressure correction",
         )
 
         if title:

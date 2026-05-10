@@ -248,7 +248,8 @@ def _plot_single_shap_for_model(model: Any,
                                 bg_k: int = 50,
                                 force: bool = False,
                                 figsize: tuple = None,
-                                font_size: int = 12) -> None:
+                                font_size: int = 12,
+                                panel_title: Optional[str] = None) -> None:
     if (not force) and os.path.exists(save_path):
         print(f"SHAP exists, skip: {save_path}")
         return
@@ -269,6 +270,7 @@ def _plot_single_shap_for_model(model: Any,
         figsize=figsize,
         font_size=font_size,
         show_suptitle=False,
+        panel_title=panel_title,
     )
     _save_any(fig, save_path)
     print(f"saved: {save_path}")
@@ -473,7 +475,9 @@ def _plot_shap(exp_id: str,
                max_samples: int = 300,
                bg_k: int = 50,
                force: bool = False,
-               remove_single: bool = True) -> None:
+               remove_single: bool = True,
+               panel_titles: Optional[Dict[str, str]] = None,
+               figsize: Optional[tuple] = None) -> None:
     for target in ['T', 'P']:
         model_data = _load_model(results_dir, exp_id, target)
         if model_data is None:
@@ -526,6 +530,8 @@ def _plot_shap(exp_id: str,
                     bg_k=bg_k,
                     force=force,
                     font_size=12,
+                    panel_title=panel_titles.get(target) if panel_titles else None,
+                    figsize=figsize,
                 )
             except Exception as e:
                 print(f"skip: SHAP failed for {exp_id}_{target}: {e}")
@@ -569,22 +575,22 @@ def _merge_shap_2x2(exp_id_liq: str,
 
     imgs = [_to_float(im) for im in imgs]
 
-    max_h = max(im.shape[0] for im in imgs)
+    # imgs order: [Liquid-T, Liquid-P, NoLiquid-T, NoLiquid-P]
+    # Liquid panels and NoLiquid panels have different natural heights
+    # (more features -> taller image). Use per-row height ratios so each
+    # row gets exactly its image's height — no padding, no whitespace gap.
+    liq_h = max(imgs[0].shape[0], imgs[1].shape[0])
+    noliq_h = max(imgs[2].shape[0], imgs[3].shape[0])
     max_w = max(im.shape[1] for im in imgs)
 
-    def _pad_white(im: np.ndarray) -> np.ndarray:
-        h, w = im.shape[:2]
-        c = im.shape[2] if im.ndim == 3 else 1
-        canvas = np.ones((max_h, max_w, c), dtype=np.float32)
-        ph, pw = (max_h - h) // 2, (max_w - w) // 2
-        canvas[ph:ph + h, pw:pw + w] = im
-        return canvas
-
-    imgs = [_pad_white(im) for im in imgs]
-
     panel_w_in = max_w / 300.0
-    panel_h_in = max_h / 300.0
-    fig, axes = plt.subplots(2, 2, figsize=(panel_w_in * 2, panel_h_in * 2), dpi=300)
+    fig_h_in = (liq_h + noliq_h) / 300.0
+    fig, axes = plt.subplots(
+        2, 2,
+        figsize=(panel_w_in * 2, fig_h_in),
+        gridspec_kw={'height_ratios': [liq_h, noliq_h]},
+        dpi=300,
+    )
     for ax, im in zip(axes.ravel(), imgs):
         ax.imshow(im, interpolation='lanczos')
         ax.axis('off')
@@ -613,18 +619,33 @@ def _plot_shap_figure5(exp_id_liq: str,
     """Plot SHAP for both Liquid and NoLiquid configs and assemble a 2x2 Figure 5."""
     exp_id_noliq = exp_id_liq.replace('_liq', '_noliq')
 
-    for exp_id in (exp_id_liq, exp_id_noliq):
-        _plot_shap(
-            exp_id=exp_id,
-            results_dir=results_dir,
-            fig_dir=fig_dir,
-            data_path=data_path,
-            data_encoding=data_encoding,
-            max_samples=max_samples,
-            bg_k=bg_k,
-            force=force,
-            remove_single=False,
-        )
+    liq_titles = {'T': 'a) Liquid — Temperature', 'P': 'b) Liquid — Pressure'}
+    noliq_titles = {'T': 'c) NoLiquid — Temperature', 'P': 'd) NoLiquid — Pressure'}
+
+    _plot_shap(
+        exp_id=exp_id_liq,
+        results_dir=results_dir,
+        fig_dir=fig_dir,
+        data_path=data_path,
+        data_encoding=data_encoding,
+        max_samples=max_samples,
+        bg_k=bg_k,
+        force=force,
+        remove_single=False,
+        panel_titles=liq_titles,
+    )
+    _plot_shap(
+        exp_id=exp_id_noliq,
+        results_dir=results_dir,
+        fig_dir=fig_dir,
+        data_path=data_path,
+        data_encoding=data_encoding,
+        max_samples=max_samples,
+        bg_k=bg_k,
+        force=force,
+        remove_single=False,
+        panel_titles=noliq_titles,
+    )
 
     _merge_shap_2x2(
         exp_id_liq=exp_id_liq,
@@ -738,7 +759,7 @@ def _plot_sampling_bias_triptych(data_path: str,
     axes[1].set_ylabel("Count")
     if show_subplot_titles:
         axes[1].set_title("b) Pressure Marginal Distribution")
-    for thr, color in [(2.5, "#ff7f0e"), (10.0, "#2ca02c"), (20.0, "#d62728")]:
+    for thr, color in [(2.5, "#ff7f0e"), (20.0, "#d62728")]:
         axes[1].axvline(thr, color=color, linestyle="--", linewidth=1.2, alpha=0.9)
 
     cdf_ax = axes[1].twinx()
