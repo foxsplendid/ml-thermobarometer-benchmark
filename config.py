@@ -118,30 +118,21 @@ class Config:
 
 def get_version_info() -> Dict[str, Any]:
     """get_version_info function."""
-    info = {
+    from src.repro import code_fingerprint, combined_sha, git_state
+
+    info: Dict[str, Any] = {
         'python_version': sys.version,
         'platform': sys.platform,
         'timestamp': datetime.now().isoformat(),
     }
 
-    # Git commit hash
-    try:
-        result = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
-            capture_output=True, text=True, cwd=str(PROJECT_ROOT)
-        )
-        if result.returncode == 0:
-            info['git_commit'] = result.stdout.strip()
+    git = git_state(PROJECT_ROOT)
+    info['git_commit'] = git['commit']
+    info['git_dirty'] = git['dirty']
 
-        # Git dirty status
-        result = subprocess.run(
-            ['git', 'status', '--porcelain'],
-            capture_output=True, text=True, cwd=str(PROJECT_ROOT)
-        )
-        info['git_dirty'] = bool(result.stdout.strip())
-    except Exception:
-        info['git_commit'] = 'unknown'
-        info['git_dirty'] = None
+    fp = code_fingerprint(PROJECT_ROOT)
+    info['code_sha'] = combined_sha(fp)
+    info['code_n_files'] = len(fp)
 
     import numpy
     import pandas

@@ -109,3 +109,6 @@ figure/
 # ============================================================
 results/learning_curve/learning_curve_checkpoint*.csv
 results/stability/*_checkpoint_*.csv
+
+# Local Claude Configurations
+.claude/

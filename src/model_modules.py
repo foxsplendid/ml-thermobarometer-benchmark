@@ -17,22 +17,35 @@ from .interfaces import ModelModule
 def _get_default_n_jobs() -> int:
     """Return the default n_jobs for sklearn parallel estimators.
 
-    Reads the ``ML_N_JOBS`` environment variable (integer) to allow external
-    parallel scripts to control per-model thread usage and avoid thread
-    contention when running multiple experiments concurrently.
-    Defaults to -1 (use all logical cores) when unset.
+    Delegates to :func:`src.runtime.suggest_n_jobs` so that ML_N_JOBS,
+    ML_RESERVE_CORES and ML_OUTER_PROCS are honoured consistently across
+    model modules and cooperative with sibling processes.
     """
-    env_val = os.environ.get('ML_N_JOBS')
-    if env_val is not None:
-        try:
-            return int(env_val)
-        except ValueError:
-            pass
-    return -1  # use all available cores
+    from .runtime import suggest_n_jobs
+    return suggest_n_jobs("model")
 
 
-def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> Dict[str, Any]:
-    """_get_catboost_task_type function."""
+def _get_catboost_task_type(
+    task_type: str = 'auto',
+    gpu_devices: str = '0',
+    n_samples: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Resolve CatBoost ``task_type`` / ``devices`` based on user preference,
+    GPU availability and dataset size.
+
+    Decision rules:
+      - ``'CPU'`` -> always CPU.
+      - ``'GPU'`` -> always GPU (errors out if no device).
+      - ``'auto'`` ->
+          * no CUDA device -> CPU.
+          * dataset smaller than ``ML_CATBOOST_GPU_MIN_SAMPLES`` (default 5000)
+            -> CPU. CatBoost GPU has non-trivial startup overhead and CPU
+            is faster on small problems.
+          * otherwise -> GPU.
+
+    ``n_samples=None`` skips the size gate (back-compat with V7 callers that
+    decide at init time).
+    """
     from catboost.utils import get_gpu_device_count
 
     task_type_upper = task_type.upper().strip()
@@ -43,9 +56,20 @@ def _get_catboost_task_type(task_type: str = 'auto', gpu_devices: str = '0') -> 
     if task_type_upper == 'GPU':
         return {'task_type': 'GPU', 'devices': gpu_devices}
 
-    if get_gpu_device_count() >= 1:
-        return {'task_type': 'GPU', 'devices': gpu_devices}
-    return {}
+    # 'auto' path
+    if get_gpu_device_count() < 1:
+        return {}
+
+    if n_samples is not None:
+        threshold = os.environ.get('ML_CATBOOST_GPU_MIN_SAMPLES', '5000')
+        try:
+            threshold_int = int(threshold)
+        except ValueError:
+            threshold_int = 5000
+        if n_samples < threshold_int:
+            return {}  # small dataset: CPU is faster
+
+    return {'task_type': 'GPU', 'devices': gpu_devices}
 
 
 # ============================================================
@@ -102,11 +126,10 @@ class ExtraTreesModel(ModelModule):
 # ============================================================
 # ============================================================
 
-# Single source of truth for CatBoost standalone defaults.
-# build_model_params() reads from config.yml for experiment runs;
-# these values apply only when CatBoostModel() is called directly.
-# Keep in sync with config.yml model_defaults.catboost —
-# test_catboost_defaults_match_config() asserts they match.
+# Standalone defaults for direct CatBoostModel() construction.
+# The experiment harness builds parameters via experiment_params.build_model_params,
+# which reads config.CatBoostConfig — that dataclass is the single source of truth.
+# Keep these values aligned with config.CatBoostConfig.
 _CATBOOST_DEFAULTS: Dict[str, Any] = {
     "iterations": 1000,
     "depth": 6,
@@ -130,7 +153,11 @@ class CatBoostModel(ModelModule):
                  task_type: str = _CATBOOST_DEFAULTS["task_type"],
                  gpu_devices: str = _CATBOOST_DEFAULTS["gpu_devices"],
                  **kwargs):
-        gpu_params = _get_catboost_task_type(task_type, gpu_devices)
+        # Store preferences; resolve device + thread_count at fit() time
+        # when we know the training set size (H3).
+        self._task_type_pref = task_type
+        self._gpu_devices_pref = gpu_devices
+        self._user_kwargs = dict(kwargs)
 
         self.params = {
             'iterations': iterations,
@@ -140,25 +167,34 @@ class CatBoostModel(ModelModule):
             'random_seed': random_seed,
             'verbose': False if silent else 100,
             'allow_writing_files': False,
-            **gpu_params,
-            **kwargs
         }
         self._training_time = 0.0
-    
-    def fit(self, 
-            X_train: np.ndarray, 
+
+    def _resolve_runtime_params(self, n_samples: int) -> Dict[str, Any]:
+        """Compose final CatBoost params using runtime info (data size, GPU)."""
+        gpu_params = _get_catboost_task_type(
+            self._task_type_pref, self._gpu_devices_pref, n_samples=n_samples
+        )
+        thread_kw: Dict[str, Any] = {}
+        if 'task_type' not in gpu_params and 'thread_count' not in self._user_kwargs:
+            thread_kw['thread_count'] = _get_default_n_jobs()
+        return {**self.params, **gpu_params, **thread_kw, **self._user_kwargs}
+
+    def fit(self,
+            X_train: np.ndarray,
             y_train: np.ndarray,
             sample_weights: Optional[np.ndarray] = None,
             stratify_labels: Optional[np.ndarray] = None) -> Any:
         """fit function."""
         from catboost import CatBoostRegressor, Pool
-        
+
         start_time = time.time()
-        
+
+        resolved = self._resolve_runtime_params(n_samples=len(y_train))
         train_pool = Pool(X_train, y_train, weight=sample_weights)
-        model = CatBoostRegressor(**self.params)
+        model = CatBoostRegressor(**resolved)
         model.fit(train_pool)
-        
+
         self._training_time = time.time() - start_time
         return model
     

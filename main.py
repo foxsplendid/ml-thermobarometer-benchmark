@@ -309,6 +309,29 @@ def _init_logging():
     return get_logger(__name__)
 
 
+def _print_runtime_banner():
+    """Print hardware probe + effective parallel budget (M3.startup).
+
+    Helps diagnose oversubscription when several CC / experiment processes
+    run on the same machine. Set ML_RESERVE_CORES and/or ML_OUTER_PROCS
+    to leave headroom for siblings.
+    """
+    try:
+        from src.runtime import runtime_summary_str, suggest_n_jobs
+        print(runtime_summary_str())
+        print(
+            f"  effective n_jobs: model={suggest_n_jobs('model')} "
+            f"inner_loop={suggest_n_jobs('inner_loop')} "
+            f"cross_proc={suggest_n_jobs('cross_proc')}"
+        )
+        reserve = os.environ.get('ML_RESERVE_CORES', '0')
+        cap = os.environ.get('ML_N_JOBS', '(none)')
+        outer = os.environ.get('ML_OUTER_PROCS', '1')
+        print(f"  env: ML_RESERVE_CORES={reserve} ML_N_JOBS={cap} ML_OUTER_PROCS={outer}")
+    except Exception as exc:
+        print(f"  (runtime banner failed: {exc})")
+
+
 if __name__ == '__main__':
     import argparse
 
@@ -317,6 +340,8 @@ if __name__ == '__main__':
         parser = argparse.ArgumentParser(description='Benchmark Protocol')
         parser.add_argument('--test', action='store_true', help='Run quick test')
         args = parser.parse_args()
+
+        _print_runtime_banner()
 
         if args.test:
             run_quick_test()

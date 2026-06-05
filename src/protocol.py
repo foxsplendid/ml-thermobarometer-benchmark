@@ -208,14 +208,90 @@ def _get_effective_n_splits(labels: Optional[np.ndarray], requested: int, n_samp
 # ============================================================
 
 class StratifiedCVProtocol:
-    """StratifiedCVProtocol class."""
-    
+    """StratifiedCVProtocol class.
+
+    V8 changes vs V7
+    -----------------
+    - ``merge_sparse_bins`` (default True): merge P-T bins with fewer than
+      ``min_samples_per_bin`` samples into the nearest non-sparse bin BEFORE
+      splitting. Eliminates StratifiedKFold "least populated class" warnings
+      and unifies behaviour with the stability / learning-curve tools.
+    - ``nested_correction`` (default True): when a non-trivial correction
+      module is supplied, fit per-fold correctors on **inner-CV OOF**
+      predictions of the outer training portion (instead of fitting once on
+      the full aggregated OOF and applying it back to itself). Removes
+      in-sample bias in the reported correction effect. Set to False to
+      reproduce V7 numerics exactly.
+    """
+
     def __init__(self,
                  n_splits: int = 10,
-                 random_seed: int = 42):
+                 random_seed: int = 42,
+                 merge_sparse_bins: bool = True,
+                 min_samples_per_bin: Optional[int] = None,
+                 nested_correction: bool = True,
+                 inner_correction_cv: int = 5):
         self.n_splits = n_splits
         self.random_seed = random_seed
-    
+        self.merge_sparse_bins = merge_sparse_bins
+        self.min_samples_per_bin = min_samples_per_bin
+        self.nested_correction = nested_correction
+        self.inner_correction_cv = inner_correction_cv
+
+    def _compute_inner_oof(self,
+                           X_outer_train: np.ndarray,
+                           y_outer_train: np.ndarray,
+                           stratify_outer_train: Optional[np.ndarray],
+                           pipeline_factory: Callable[..., 'Pipeline'],
+                           outer_fold_id: int) -> np.ndarray:
+        """Run an inner K-fold on the outer training portion; return inner OOF.
+
+        Used by nested-correction evaluation: the resulting predictions are
+        out-of-fold *with respect to the inner split*, so fitting a corrector
+        on (y_outer_train, inner_oof) does not see the values it will later
+        be evaluated on (the outer validation fold).
+        """
+        n = len(y_outer_train)
+        k = _get_effective_n_splits(stratify_outer_train, self.inner_correction_cv, n)
+
+        if stratify_outer_train is not None:
+            inner_splitter = StratifiedKFold(
+                n_splits=k, shuffle=True,
+                random_state=self.random_seed + outer_fold_id + 7919,
+            )
+            inner_iter = inner_splitter.split(X_outer_train, stratify_outer_train)
+        else:
+            inner_splitter = KFold(
+                n_splits=k, shuffle=True,
+                random_state=self.random_seed + outer_fold_id + 7919,
+            )
+            inner_iter = inner_splitter.split(X_outer_train)
+
+        inner_oof = np.full(n, np.nan, dtype=np.float64)
+        for inner_fold_id, (it_idx, iv_idx) in enumerate(inner_iter):
+            seed = self.random_seed + outer_fold_id * 1000 + inner_fold_id
+            inner_pipe = _call_pipeline_factory(pipeline_factory, seed, fold_idx=0)
+            inner_strat = (
+                stratify_outer_train[it_idx] if stratify_outer_train is not None else None
+            )
+            inner_pipe.fit(
+                X_outer_train[it_idx],
+                y_outer_train[it_idx],
+                stratify_labels=inner_strat,
+                fold_seed=seed,
+            )
+            X_iv_scaled, _ = inner_pipe.data_module.transform(
+                X_outer_train[iv_idx], inner_pipe._state
+            )
+            inner_oof[iv_idx] = inner_pipe.predict(X_iv_scaled, apply_correction=False)
+
+        if np.any(np.isnan(inner_oof)):
+            raise RuntimeError(
+                f"Inner OOF (outer fold {outer_fold_id}) contains NaN — "
+                "an inner-fold sample was never used as a validation point."
+            )
+        return inner_oof
+
     def run(self,
             X: np.ndarray,
             y: np.ndarray,
@@ -225,6 +301,20 @@ class StratifiedCVProtocol:
             stratify_labels: Optional[np.ndarray] = None,
             verbose: bool = True) -> Dict[str, Any]:
         """run function."""
+        from .correction_modules import NoCorrection
+
+        # --- S2: unify sparse-bin handling with the sub-experiment tools ---
+        if stratify_labels is not None and self.merge_sparse_bins:
+            min_bin = self.min_samples_per_bin if self.min_samples_per_bin is not None else self.n_splits
+            n_unique_before = len(np.unique(stratify_labels))
+            stratify_labels = _merge_sparse_bins(
+                stratify_labels, min_samples_per_bin=min_bin, verbose=verbose
+            )
+            n_unique_after = len(np.unique(stratify_labels))
+            if verbose and n_unique_after != n_unique_before:
+                print(f"  Merged sparse P-T bins: {n_unique_before} -> {n_unique_after} "
+                      f"(min_samples_per_bin={min_bin})")
+
         if stratify_labels is None:
             logger.warning(
                 "stratify_labels=None: using plain KFold instead of StratifiedKFold; "
@@ -272,11 +362,13 @@ class StratifiedCVProtocol:
 
             fold_records.append({
                 'fold_id': fold_idx,
+                'train_idx': train_idx,
                 'val_idx': val_idx,
                 'y_val': y_val,
                 'y_pred_raw': y_pred_raw,
                 'pipeline': pipeline,
                 'X_val': X_val,
+                'stratify_train': stratify_train,
                 'training_time': fold_time,
             })
 
@@ -284,10 +376,36 @@ class StratifiedCVProtocol:
             raise RuntimeError("OOF prediction contains NaN values.")
 
         if corr_module is None:
-            from .correction_modules import NoCorrection
             corr_module = NoCorrection()
 
+        # --- aggregate corrector: used for the persisted full-fit pipeline and
+        # the held-out test-set evaluation. Always fit on full OOF. ---
         corr_model = corr_module.fit(y, oof_pred_raw)
+
+        # --- S1: nested per-fold correctors for unbiased CV evaluation ---
+        is_trivial_corr = isinstance(corr_module, NoCorrection)
+        use_nested = self.nested_correction and not is_trivial_corr
+        correction_eval_mode = (
+            "nested" if use_nested
+            else ("none" if is_trivial_corr else "in_sample")
+        )
+
+        if use_nested:
+            if verbose:
+                print(f"  Nested correction: inner_cv={self.inner_correction_cv} on each outer fold")
+            for record in fold_records:
+                tr = record['train_idx']
+                stratify_outer_train = (
+                    stratify_labels[tr] if stratify_labels is not None else None
+                )
+                inner_oof = self._compute_inner_oof(
+                    X_outer_train=X[tr],
+                    y_outer_train=y[tr],
+                    stratify_outer_train=stratify_outer_train,
+                    pipeline_factory=pipeline_factory,
+                    outer_fold_id=record['fold_id'],
+                )
+                record['corr_model_fold'] = corr_module.fit(y[tr], inner_oof)
 
         fold_metrics = []
         all_predictions = []
@@ -297,12 +415,13 @@ class StratifiedCVProtocol:
             print("  Running MC uncertainty across folds...")
 
         for record in fold_records:
-            y_pred_corr = corr_module.apply(corr_model, record['y_pred_raw'])
+            effective_corr_model = record.get('corr_model_fold', corr_model)
+            y_pred_corr = corr_module.apply(effective_corr_model, record['y_pred_raw'])
             dist = None
 
             if uncertainty_module is not None:
                 pipeline = record['pipeline']
-                pipeline.set_correction(corr_module, corr_model)
+                pipeline.set_correction(corr_module, effective_corr_model)
 
                 dist = uncertainty_module.predict_distribution(
                     pipeline, record['X_val'], fold_idx=record['fold_id']
@@ -337,6 +456,9 @@ class StratifiedCVProtocol:
         predictions_df = pd.concat(all_predictions, ignore_index=True)
         summary = summarize_folds(fold_metrics)
         summary['total_training_time'] = sum(training_times)
+        summary['correction_eval_mode'] = correction_eval_mode
+        summary['correction_inner_cv'] = self.inner_correction_cv if use_nested else 0
+        summary['merge_sparse_bins'] = bool(self.merge_sparse_bins)
 
         uncertainty_results = None
         if unc_fold_metrics is not None:
@@ -402,6 +524,10 @@ class ExperimentMatrix:
                         y_T_test: Optional[np.ndarray] = None,
                         y_P_test: Optional[np.ndarray] = None,
                         random_seed: int = 42,
+                        merge_sparse_bins: bool = True,
+                        min_samples_per_bin: Optional[int] = None,
+                        nested_correction: bool = True,
+                        inner_correction_cv: int = 5,
                         verbose: bool = True) -> pd.DataFrame:
         """run_experiments function."""
         from .data_modules import get_data_module
@@ -467,7 +593,14 @@ class ExperimentMatrix:
                     unc_module = MCUncertaintyEstimator(**unc_params)
                 print(f"\n--- Target: {target_name} ---")
                 
-                protocol = StratifiedCVProtocol(n_splits=n_splits, random_seed=target_seed)
+                protocol = StratifiedCVProtocol(
+                    n_splits=n_splits,
+                    random_seed=target_seed,
+                    merge_sparse_bins=merge_sparse_bins,
+                    min_samples_per_bin=min_samples_per_bin,
+                    nested_correction=nested_correction,
+                    inner_correction_cv=inner_correction_cv,
+                )
                 corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
                 results = protocol.run(
                     self.X, y,
@@ -817,7 +950,23 @@ class ExperimentMatrix:
                 'n_features': self.X.shape[1],
             },
             'version_info': version_info,
+            'code_sha': version_info.get('code_sha'),
         }
+
+        try:
+            from .runtime import get_runtime, suggest_n_jobs
+            r = get_runtime()
+            config_data['runtime'] = {
+                'platform': r.platform,
+                'n_physical_cores': r.n_physical_cores,
+                'n_logical_cores': r.n_logical_cores,
+                'has_cuda_gpu': r.has_cuda_gpu,
+                'n_gpu_devices': r.n_gpu_devices,
+                'ram_gb': r.ram_gb,
+                'effective_n_jobs_model': suggest_n_jobs('model'),
+            }
+        except Exception:
+            pass
         
         n_features_by_feature_set = None
         if extra_info and 'n_features_by_feature_set' in extra_info:
