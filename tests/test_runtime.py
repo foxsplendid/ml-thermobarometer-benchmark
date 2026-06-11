@@ -32,6 +32,34 @@ def test_runtime_summary_str():
     assert "cores" in s
 
 
+def test_gpu_probe_failure_returns_no_gpu(monkeypatch):
+    """SPEC §3: GPU probe failures must degrade to no-GPU, not raise."""
+    import sys
+    import types
+    import src.runtime as rt
+
+    class _BrokenCuda:
+        def is_available(self):
+            raise RuntimeError("driver exploded")
+
+    broken_torch = types.ModuleType("torch")
+    broken_torch.cuda = _BrokenCuda()
+
+    def _boom():
+        raise RuntimeError("no driver")
+
+    broken_cb_utils = types.ModuleType("catboost.utils")
+    broken_cb_utils.get_gpu_device_count = _boom
+    broken_cb = types.ModuleType("catboost")
+    broken_cb.utils = broken_cb_utils
+
+    monkeypatch.setitem(sys.modules, "torch", broken_torch)
+    monkeypatch.setitem(sys.modules, "catboost", broken_cb)
+    monkeypatch.setitem(sys.modules, "catboost.utils", broken_cb_utils)
+
+    assert rt._probe_gpu() == (False, 0, None)
+
+
 def _with_env(monkeypatch, **env):
     for k, v in env.items():
         if v is None:

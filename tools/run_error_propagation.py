@@ -199,7 +199,7 @@ def _run_error_propagation(
             "model_fixed": "Model fitted on full training data, no CV or retraining",
             "perturbation_target": "All input features (EPMA oxide wt% columns)",
             "rel_err_method": "Per-oxide mapping (Ágreda-López et al. 2024), not threshold-based",
-            "no_clip": "Negative perturbations allowed to preserve distribution shape",
+            "clip": "Perturbed oxide wt% clipped at 0 for physical non-negativity (S3, V8); with 3-8% relative errors the clip probability is < 4e-36 per draw, so distributions are unchanged",
             "no_closure": "No sum normalization, consistent with training data preprocessing",
         },
         "metric_notes": {
@@ -464,6 +464,11 @@ if __name__ == "__main__":
         logger = get_logger(__name__)
 
     _init_logging()
+    try:
+        from src.runtime import runtime_summary_str
+        print(runtime_summary_str())
+    except Exception:
+        pass
     try:
         exit_code = main()
     except Exception:

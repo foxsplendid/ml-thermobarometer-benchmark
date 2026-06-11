@@ -167,7 +167,13 @@ def run_cv_for_subsample(
 
     effective_n_splits = get_effective_n_splits(len(X_sub), merged_labels, n_splits)
 
-    protocol = StratifiedCVProtocol(n_splits=effective_n_splits, random_seed=random_seed)
+    # nested_correction=False: keep V7 in-sample correction semantics (and
+    # cost) for learning-curve CV numbers; the nested-evaluation upgrade (S1)
+    # applies to the main benchmark only. See CHANGES_FROM_V7.md M4.
+    protocol = StratifiedCVProtocol(
+        n_splits=effective_n_splits, random_seed=random_seed,
+        nested_correction=False,
+    )
 
     try:
         results = protocol.run(
@@ -629,6 +635,11 @@ if __name__ == '__main__':
         logger = get_logger(__name__)
 
     _init_logging()
+    try:
+        from src.runtime import runtime_summary_str
+        print(runtime_summary_str())
+    except Exception:
+        pass
     try:
         main()
     except Exception:

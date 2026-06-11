@@ -319,6 +319,11 @@ if __name__ == "__main__":
 
     _init_logging()
     try:
+        from src.runtime import runtime_summary_str
+        print(runtime_summary_str())
+    except Exception:
+        pass
+    try:
         exit_code = main()
     except Exception:
         logger.exception("Stability test run failed")

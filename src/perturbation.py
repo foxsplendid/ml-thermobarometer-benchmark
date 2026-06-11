@@ -48,14 +48,27 @@ def get_rel_err_vector(
 def epma_perturb(
     X: np.ndarray,
     rel_err_vec: np.ndarray,
-    rng: np.random.RandomState
+    rng: np.random.RandomState,
+    clip_negative: bool = True
 ) -> np.ndarray:
-    """epma_perturb function."""
+    """epma_perturb function.
+
+    clip_negative (S3, V8): oxide wt% is physically non-negative, so
+    perturbed values are clipped at 0. With the default 3-8% relative errors
+    the clip probability is Phi(-1/rel_err) < 4e-36 per draw, i.e. it never
+    fires and results are bit-identical to V7 (the RNG stream is unchanged).
+    It only matters for user-supplied rel errors >~0.2, where it introduces a
+    point mass at 0 and a slight upward mean bias — the intended physical
+    behaviour. clip_negative=False reproduces V7 exactly.
+    """
     scale = rel_err_vec * np.abs(X)
 
     noise = rng.normal(0.0, scale, size=X.shape)
 
-    return X + noise
+    X_pert = X + noise
+    if clip_negative:
+        X_pert = np.maximum(X_pert, 0.0)
+    return X_pert
 
 
 def perturbation_with_repeats(
@@ -65,7 +78,8 @@ def perturbation_with_repeats(
     n_perturbations: int = 15,
     rng: Optional[np.random.RandomState] = None,
     random_seed: int = 42,
-    include_original: bool = True
+    include_original: bool = True,
+    clip_negative: bool = True
 ) -> Tuple[np.ndarray, np.ndarray]:
     """perturbation_with_repeats function."""
     if rng is None:
@@ -78,7 +92,7 @@ def perturbation_with_repeats(
         y_list = [y]
 
         for _ in range(n_perturbations):
-            X_perturbed = epma_perturb(X, rel_err_vec, rng)
+            X_perturbed = epma_perturb(X, rel_err_vec, rng, clip_negative=clip_negative)
             X_list.append(X_perturbed)
             y_list.append(y)
 
@@ -90,6 +104,8 @@ def perturbation_with_repeats(
 
         scale = rel_err_vec * np.abs(X_rep)
         X_aug = rng.normal(X_rep, scale)
+        if clip_negative:
+            X_aug = np.maximum(X_aug, 0.0)
 
     return X_aug, y_aug
 

@@ -68,6 +68,8 @@ ml-thermobarometer-benchmark/
 │   ├── protocol.py
 │   ├── splitters.py
 │   ├── perturbation.py
+│   ├── runtime.py          # V8: hardware probe + parallel budget
+│   ├── repro.py            # V8: code fingerprint + git state
 │   ├── metrics.py
 │   ├── viz.py
 │   └── logger.py
@@ -91,6 +93,19 @@ Python >= 3.9 is recommended.
 ```bash
 pip install -r requirements.txt
 ```
+
+### 1.1 Environment Variables (V8)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ML_N_JOBS` | unset | Per-model thread cap (V7 compat; `<=0` means all cores). Hard upper bound. |
+| `ML_RESERVE_CORES` | `0` | Cores left free for sibling processes. **Set `2` when other heavy jobs (e.g. concurrent agent/CI sessions) share this machine.** |
+| `ML_OUTER_PROCS` | `1` | Number of sibling outer processes; `cross_proc` budgets divide by it. |
+| `ML_CATBOOST_GPU_MIN_SAMPLES` | `5000` | With `task_type='auto'`, CatBoost only uses the GPU at or above this training-set size (GPU startup overhead dominates on small data). |
+
+Every training entry point prints a hardware/budget banner at startup; `pytest`
+defaults to `ML_N_JOBS=2` and `main.py --test` to `ML_N_JOBS=4` (both respect a
+pre-set value).
 
 ## 2. Quick Start
 
@@ -181,5 +196,15 @@ Notes:
 - `V5`: Refactored the experiment matrix and figure workflow.
 - `V6`: Centralized configuration and split the toolchain.
 - `V7`: Unified main/sub-experiment workflows and improved offline plotting and error-propagation pipelines.
+- `V8` (branch `V8`; see `SPEC_V8.md` / `CHANGES_FROM_V7.md`): nested correction
+  evaluation (`nested_correction=True` default — E10-E12 CV numbers now reflect
+  out-of-sample correction), unified sparse-bin merging (`merge_sparse_bins=True`
+  default — fold membership changes slightly vs V7), hardware probe + parallel
+  budget (`src/runtime.py`), reproducibility metadata (`src/repro.py`, `code_sha`
+  in `config_used.yaml`), CatBoost auto CPU/GPU by data size, EPMA perturbation
+  non-negativity clip, loud-fail on NaN at load, corrector edge-offset
+  extrapolation. Reproduce V7 numbers with
+  `nested_correction=False, merge_sparse_bins=False`
+  (guarded by `pytest -m slow tests/test_regression_vs_v7.py`).
 
 ---

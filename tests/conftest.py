@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Shared pytest fixtures for reproducible synthetic benchmark data."""
 
+import os
 import pytest
 import numpy as np
 import sys
@@ -9,6 +10,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# SPEC §11.3: keep local test runs from saturating the machine. Tests that
+# need a different cap set/delete ML_N_JOBS themselves via monkeypatch.
+os.environ.setdefault("ML_N_JOBS", "2")
 
 
 # ============================================================

@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 # seed increments (max expected n_splits ≤ 50).
 P_SEED_OFFSET = 1000
 
+# Base offset for inner-CV pipeline seeds (nested correction).  Must keep the
+# inner seed ranges of the T target (base) and P target (base + P_SEED_OFFSET)
+# disjoint from each other and from the outer per-fold seeds: with
+# outer_fold_id * INNER_SEED_FOLD_STRIDE + inner_fold_id < P_SEED_OFFSET the
+# T range [base + OFFSET, base + OFFSET + 999] and the P range shifted by
+# P_SEED_OFFSET never overlap.
+INNER_SEED_OFFSET = 500_000
+INNER_SEED_FOLD_STRIDE = 100
+
 def _derive_target_seed(base_seed: int, target_name: str) -> int:
     """_derive_target_seed function."""
     return base_seed + (P_SEED_OFFSET if str(target_name).upper() == "P" else 0)
@@ -253,14 +262,32 @@ class StratifiedCVProtocol:
         """
         n = len(y_outer_train)
         k = _get_effective_n_splits(stratify_outer_train, self.inner_correction_cv, n)
+        if k < self.inner_correction_cv:
+            logger.warning(
+                "Inner correction CV reduced from %d to %d on outer fold %d "
+                "(sparse stratification bins).",
+                self.inner_correction_cv, k, outer_fold_id,
+            )
 
+        # SPEC §5.5: fall back to plain KFold when the labels cannot support a
+        # stratified split (some bin has fewer members than n_splits).
+        can_stratify = False
         if stratify_outer_train is not None:
+            _, bin_counts = np.unique(stratify_outer_train, return_counts=True)
+            can_stratify = bin_counts.size > 0 and int(bin_counts.min()) >= k
+
+        if can_stratify:
             inner_splitter = StratifiedKFold(
                 n_splits=k, shuffle=True,
                 random_state=self.random_seed + outer_fold_id + 7919,
             )
             inner_iter = inner_splitter.split(X_outer_train, stratify_outer_train)
         else:
+            if stratify_outer_train is not None:
+                logger.warning(
+                    "Inner correction CV on outer fold %d falls back to plain "
+                    "KFold: stratification bins too sparse.", outer_fold_id,
+                )
             inner_splitter = KFold(
                 n_splits=k, shuffle=True,
                 random_state=self.random_seed + outer_fold_id + 7919,
@@ -269,7 +296,8 @@ class StratifiedCVProtocol:
 
         inner_oof = np.full(n, np.nan, dtype=np.float64)
         for inner_fold_id, (it_idx, iv_idx) in enumerate(inner_iter):
-            seed = self.random_seed + outer_fold_id * 1000 + inner_fold_id
+            seed = (self.random_seed + INNER_SEED_OFFSET
+                    + outer_fold_id * INNER_SEED_FOLD_STRIDE + inner_fold_id)
             inner_pipe = _call_pipeline_factory(pipeline_factory, seed, fold_idx=0)
             inner_strat = (
                 stratify_outer_train[it_idx] if stratify_outer_train is not None else None
@@ -368,7 +396,6 @@ class StratifiedCVProtocol:
                 'y_pred_raw': y_pred_raw,
                 'pipeline': pipeline,
                 'X_val': X_val,
-                'stratify_train': stratify_train,
                 'training_time': fold_time,
             })
 
@@ -816,7 +843,13 @@ class ExperimentMatrix:
             
                     effective_n_splits = _get_effective_n_splits(merged_labels, n_splits, len(X_train))
             
-                    protocol = StratifiedCVProtocol(n_splits=effective_n_splits, random_seed=seed)
+                    # nested_correction=False: this tool only consumes the
+                    # aggregate corr_model below; per-fold nested correctors
+                    # would be ~5x extra fits per repeat thrown away unused.
+                    protocol = StratifiedCVProtocol(
+                        n_splits=effective_n_splits, random_seed=seed,
+                        nested_correction=False,
+                    )
                     cv_results = protocol.run(
                         X_train,
                         y_train,
@@ -952,6 +985,13 @@ class ExperimentMatrix:
             'version_info': version_info,
             'code_sha': version_info.get('code_sha'),
         }
+
+        try:
+            from config import PROJECT_ROOT
+            from .repro import code_fingerprint
+            config_data['code_fingerprint'] = code_fingerprint(PROJECT_ROOT)
+        except Exception:
+            pass
 
         try:
             from .runtime import get_runtime, suggest_n_jobs

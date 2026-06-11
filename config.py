@@ -2,7 +2,6 @@
 """Central configuration definitions and version metadata for the benchmark."""
 
 import sys
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path

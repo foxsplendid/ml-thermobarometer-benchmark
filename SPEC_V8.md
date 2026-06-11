@@ -26,11 +26,15 @@
 
 ---
 
-## 1. 工作目录约定
+## 1. 工作目录约定 (2026-06-11 起改为分支模式)
 
-- **源目录**: `D:/Code/Jupyter/ml-thermobarometer-benchmark/` — 只读对照,V7 终态。
-- **本目录**: `D:/Code/Jupyter/ml-thermobarometer-benchmark-v8/` — 所有改动在此发生。
-- **结果隔离**: V8 写入 `results/` (复制自 V7,作为回归基线); 新跑落到 `results_v8/`,通过 `config.output.output_dir` 切换。
+- **仓库**: `D:/Code/Jupyter/ml-thermobarometer-benchmark/`,git 管理。
+- **`main` 分支**: V7 终态,**受保护——禁止直接提交**。
+- **`V8` 分支**: 所有 V8 改动在此分支发生 (初始提交 778bfe9 来自已删除的
+  `ml-thermobarometer-benchmark-v8/` 目录)。
+- **结果隔离**: `results/` 是 V7 黄金基线 (回归测试的对照),V8 完整重跑前不覆盖;
+  快速测试落 `results_test/`。
+- **运行环境**: `D:\anaconda3\envs\cpx\python.exe` (catboost 1.2.7);base Anaconda 无 catboost。
 - **依赖**: 与 V7 共用 `requirements.txt`,新增依赖在本文件 §10 列出。
 
 ---
@@ -80,7 +84,7 @@ class Runtime:
     has_cuda_gpu: bool
     n_gpu_devices: int
     gpu_mem_gb: float | None
-    ram_gb: float
+    ram_gb: float | None      # psutil 不可用时为 None
     platform: str             # sys.platform
 
 def get_runtime() -> Runtime: ...   # lazy + cached
@@ -124,7 +128,9 @@ GPU 探测优先级: `torch.cuda.is_available` → `catboost.utils.get_gpu_devic
    - `ML_N_JOBS`: 单模型最大线程数 (V7 旧约定,优先生效)。
    - `ML_RESERVE_CORES`: 给系统/其他进程预留的核数 (V8 新增)。默认 0。**用户多任务并发场景建议 `set ML_RESERVE_CORES=2`**。
    - `ML_OUTER_PROCS`: 外层并行进程数,告诉分配器把核分摊给多少个 sibling 进程。默认 1。
-4. **CatBoost 路径**: 在 `CatBoostModel.__init__` 中若未传 `thread_count`,注入 `suggest_n_jobs("model")` 防止与 sklearn 争抢。
+4. **CatBoost 路径**: 若用户未传 `thread_count`,在 `fit()` 时经
+   `_resolve_runtime_params(n_samples)` 注入 `suggest_n_jobs("model")` (仅 CPU 路径;
+   M3/H3 将设备决策推迟到 fit,因此线程注入也随之后移)。
 
 ### Verification
 - `tests/test_runtime.py::test_suggest_n_jobs_respects_reserve`:
@@ -212,7 +218,9 @@ V7 主基准对单样本 P-T bin 不合并,直接喂给 `StratifiedKFold(10)`,sk
 
 ### Mark
 - `@pytest.mark.slow`,需要 `pytest -m slow` 显式触发。
-- 默认 CI 路径只跑快测。
+- 默认 CI 路径只跑快测 (`pytest.ini` 注册 marker 并设 `addopts = -m "not slow"`)。
+- 状态: 已交付 `tests/test_regression_vs_v7.py` (E01 Liquid,`nested_correction=False,
+  merge_sparse_bins=False`,相对容差 1e-4)。
 
 ---
 
@@ -236,31 +244,30 @@ V7 主基准对单样本 P-T bin 不合并,直接喂给 `StratifiedKFold(10)`,sk
 
 ## 9. 实施顺序与里程碑
 
-### Milestone M1 — 基础设施 (本批)
-- [x] 复制项目到 v8
-- [ ] SPEC_V8.md (本文件)
-- [ ] H1 `runtime.py` + 单测
-- [ ] H2 `suggest_n_jobs` + 接入 model_modules + 单测
-- [ ] S6 `repro.py` + 清理 config 注释 + 接入 save_config + 单测
-- [ ] 回归测试骨架 (不必首次就跑,提供脚本)
-- [ ] 跑现有 `pytest tests/` 确认无回归
+### Milestone M1 — 基础设施 (完成)
+- [x] SPEC_V8.md (本文件)
+- [x] H1 `runtime.py` + 单测
+- [x] H2 `suggest_n_jobs` + 接入 model_modules + 单测
+- [x] S6 `repro.py` + 清理 config 注释 + 接入 save_config + 单测
+- [x] 回归测试 `tests/test_regression_vs_v7.py` (M4 批补交)
+- [x] 跑现有 `pytest tests/` 确认无回归
 
-### Milestone M2 — 科学修正
-- [ ] S1 nested correction
-- [ ] S2 unified sparse-bin merge
-- [ ] 跑一次完整主基准,得到 V8 基线 `results_v8/`,与 V7 对比写入 `CHANGES_FROM_V7.md`
+### Milestone M2 — 科学修正 (代码完成,V8 基线待跑)
+- [x] S1 nested correction
+- [x] S2 unified sparse-bin merge
+- [ ] 跑一次完整主基准得到 V8 基线,与 V7 对比写入 `CHANGES_FROM_V7.md`
 
-### Milestone M3 — 性能优化
-- [ ] H3 CatBoost 设备策略
-- [ ] H4 模型快速档
-- [ ] H5 增广内存优化
-- [ ] H6 缓存层
-- [ ] H7 stacking 内层并行
+### Milestone M3 — 性能优化 (H3 完成,其余移至 M3.2)
+- [x] H3 CatBoost 设备策略
+- [ ] H4 模型快速档 (M3.2)
+- [ ] H5 增广内存优化 (M3.2)
+- [ ] H6 缓存层 (M3.2)
+- [ ] H7 stacking 内层并行 (M3.2)
 
-### Milestone M4 — 数据/校正语义
-- [ ] S3 EPMA 非负截断
-- [ ] S4 缺测/零区分
-- [ ] S5 校正器边段外推
+### Milestone M4 — 数据/校正语义 (完成,详见 §13–15)
+- [x] S3 EPMA 非负截断
+- [x] S4 缺测/零区分
+- [x] S5 校正器边段外推
 
 ---
 
@@ -275,12 +282,15 @@ V7 主基准对单样本 P-T bin 不合并,直接喂给 `StratifiedKFold(10)`,sk
 
 ## 11. 并发与硬件礼让约定 (重要)
 
-用户当前**多 CC 进程并发**。所有训练入口在 V8 中遵守:
+用户当前**多 CC 进程并发**。所有训练入口在 V8 中遵守 (M4 批全部落地):
 
-1. 任何 CV 跑前打印 `runtime_summary_str()` 与 `effective n_jobs`。
-2. 默认 `ML_RESERVE_CORES=0` 不改变现状; 但 README 建议并发场景设 `2`。
-3. 测试套件 (`pytest`) 默认 `ML_N_JOBS=2`,避免本地开发把机器跑满。
-4. `main.py --test` 默认 `ML_N_JOBS=4`。
+1. 任何 CV 跑前打印 `runtime_summary_str()` 与 `effective n_jobs`
+   (`main.py` 完整横幅; `tools/run_stability.py`、`tools/run_learning_curve.py`、
+   `tools/run_error_propagation.py` 打印硬件摘要行)。
+2. 默认 `ML_RESERVE_CORES=0` 不改变现状; README 建议并发场景设 `2`。
+3. 测试套件: `tests/conftest.py` 对 `ML_N_JOBS` 做 `setdefault("2")`,
+   避免本地开发把机器跑满 (单测内 monkeypatch 不受影响)。
+4. `main.py --test`: 对 `ML_N_JOBS` 做 `setdefault("4")` (横幅打印前生效)。
 5. 完整 `main.py` 不强制覆盖,尊重用户环境。
 
 ---
@@ -291,5 +301,85 @@ V7 主基准对单样本 P-T bin 不合并,直接喂给 `StratifiedKFold(10)`,sk
 - [ ] 新代码无对 `config.yml` 的引用
 - [ ] 所有 `os.cpu_count()` 调用迁移到 `runtime.suggest_n_jobs`
 - [ ] 任何改变 CV 路径的改动都暴露开关 + 默认值 + back-compat 测试
-- [ ] `results/config_used.yaml` 含 `code_sha` 字段
+- [ ] 新跑产出的 `config_used.yaml` 含 `code_sha` + `code_fingerprint` + `runtime` 字段
+  (注意: `results/config_used.yaml` 当前是 V7 时代工件,完整重跑后才会携带新字段)
 - [ ] `CHANGES_FROM_V7.md` 已更新本次改动
+
+---
+
+## 13. S3 — EPMA 扰动非负截断 (M4,已完成)
+
+### Why
+`epma_perturb` 的乘性高斯噪声 (σ = rel_err·|x|) 理论上可产生负氧化物 wt%,
+物理上不可能。默认 3–8% 相对误差下负值概率为 Φ(-1/rel_err) < 4e-36 (永不触发),
+但用户自定义大误差 (>~0.2) 的鲁棒性实验会真实出现负值。
+
+### How
+- `epma_perturb(..., clip_negative=True)`: 加噪后 `np.maximum(x, 0)`。
+  RNG 流不变,默认误差下逐位等同 V7。
+- `perturbation_with_repeats` 同样新增 `clip_negative=True`,两个分支均截断。
+- `tools/run_error_propagation.py` 的 ep_meta JSON 说明从 `no_clip` 改为 `clip`
+  (历史结果文件中的旧说明不改——它们如实描述当时的行为)。
+- 弃选方案: 截断正态重采样/对数正态会改变 RNG 流,破坏与 V7 的逐位可复现性,收益为零。
+
+### Verification
+`tests/test_perturbation.py` (5 用例): 大误差下截断生效且未截断路径确实产生负值、
+默认误差下 clip/no-clip 逐位相等、零值列保持零、两分支形状与非负、
+截断概率 ≈ Φ(-2) 点质量检验。
+
+### Back-compat
+`clip_negative=False` 完全复现 V7。默认 True 在默认误差下数值零影响。
+
+---
+
+## 14. S4 — 区分缺测与真零 (M4,已完成)
+
+### Why
+V7 在 `main.load_data` 用 `np.nan_to_num(X, nan=0.0)` 把缺测静默填 0,
+将"未测量"与"真零浓度"混为一谈。实测 `input.csv` 特征列 **0 个 NaN**
+(该行为当前是恒等变换),但大量字面 0 是上游"未分析/低于检出限"约定
+(Cr2O3.cpx 1102/2079 行、MnO.liq 311、MnO.cpx 296、K2O.liq 177 等),
+这一信息在上游已不可恢复。
+
+### How
+- 删除 `nan_to_num`;特征或目标含 NaN 时 **loud-fail** (ValueError 列出列名与计数),
+  错误信息指明: 本基准无插补策略,树模型/CatBoost 原生容忍 NaN 但 Ridge 与
+  StandardScaler 语义不容忍,未来数据含 NaN 须显式决策。
+- 文档化零语义: 字面 0 按上游约定保留为数值零;`epma_perturb` 对 0 不加噪
+  (σ = rel_err·0 = 0),与该约定自洽。
+
+### Verification
+`tests/test_load_data.py` (4 用例): 真实 input.csv 双特征集全有限值守卫、
+特征 NaN 报错并点名列、目标 NaN 报错、零值保留。
+
+### Back-compat
+当前数据无 NaN → 数组逐位不变,E01–E12 输出不受影响。
+唯一行为变化: 未来含 NaN 数据从静默填零变为显式报错 (有意为之)。
+
+---
+
+## 15. S5 — 校正器边段外推 (M4,已完成)
+
+### Why
+V7 `SegmentedLinearCorrector.apply` 的段掩码只覆盖 `[boundaries[0], boundaries[-1]]`:
+**界外预测完全不校正** (直通),在边界处产生跳变不连续,且树模型收缩偏差最大的
+尾部恰好得不到校正。E10 实测界外暴露: P 1/1730 (0.058%)、T 2/1730 (0.116%)。
+
+### How
+- `edge_mode='offset'` (V8 默认): 界外以斜率 1 延拓,携带边段在边界处的
+  校正量作为常数加性偏移 `f(x) = x + (f_seg(b) − b)`。边界连续、保序、无新超参。
+- `edge_mode='raw'`: 复现 V7 直通;持久化 corr_model 字典缺 `edge_mode` 键时
+  (V7 时代 joblib) 默认按 `'raw'` 回放。
+- `fit` 返回字典与 `get_correction_params` 均携带 `edge_mode`;
+  边段样本不足 (model=None) 时该侧保持直通,与既有 None 段语义一致。
+- 偏移延拓在 `clip_to_train_range` 截断**之前**执行,截断仍是最终护栏。
+- 弃选方案: 输入钳位 (压扁排序信息)、斜率阻尼 (引入需辩护的超参)。
+
+### Verification
+`tests/test_correction_modules.py::TestEdgeExtrapolation` (7 用例): 界内两模式
+逐位一致、边界连续性 (1e-6)、斜率 1 与保序、raw 模式直通、缺键字典按 raw 回放、
+clip 交互、非法 edge_mode 报错。
+
+### Back-compat
+`edge_mode='raw'` 复现 V7;旧持久化模型自动回放旧行为。
+数值影响仅尾部 (E10–E12 的 ~0.06–0.12% 样本),E01–E09 不受影响。

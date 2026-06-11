@@ -42,11 +42,22 @@ class SegmentedLinearCorrector(CorrectionModule):
     def __init__(self,
                  n_segments: int = DEFAULT_N_SEGMENTS,
                  quantiles: Optional[list] = None,
-                 clip_to_train_range: bool = True):
-        """__init__ function."""
+                 clip_to_train_range: bool = True,
+                 edge_mode: str = 'offset'):
+        """__init__ function.
+
+        edge_mode controls predictions outside the fitted boundary range
+        (S5, V8): 'offset' continues with slope 1 carrying the edge segment's
+        boundary correction as a constant additive offset (continuous and
+        order-preserving); 'raw' reproduces the V7 behaviour of leaving
+        out-of-range predictions uncorrected (jump discontinuity at edges).
+        """
+        if edge_mode not in ('offset', 'raw'):
+            raise ValueError(f"edge_mode must be 'offset' or 'raw', got {edge_mode!r}")
         self.n_segments = n_segments
         self.quantiles = quantiles if quantiles is not None else DEFAULT_SEGMENT_QUANTILES
         self.clip_to_train_range = clip_to_train_range
+        self.edge_mode = edge_mode
 
     def fit(self,
             y_true_train: np.ndarray,
@@ -81,6 +92,7 @@ class SegmentedLinearCorrector(CorrectionModule):
             'y_min': float(np.min(y_true_train)),
             'y_max': float(np.max(y_true_train)),
             'clip_to_train_range': self.clip_to_train_range,
+            'edge_mode': self.edge_mode,
         }
 
     def apply(self, corr_model: Dict[str, Any], y_pred: np.ndarray) -> np.ndarray:
@@ -101,6 +113,20 @@ class SegmentedLinearCorrector(CorrectionModule):
             if np.sum(mask) > 0:
                 y_corr[mask] = model.predict(y_pred[mask].reshape(-1, 1))
 
+        # S5 (V8): out-of-range predictions. Default 'raw' when the key is
+        # absent so V7-era persisted corr_models replay their old behaviour.
+        if corr_model.get('edge_mode', 'raw') == 'offset':
+            lo, hi = boundaries[0], boundaries[-1]
+            first_model, last_model = segment_models[0], segment_models[-1]
+            below = y_pred < lo
+            if np.any(below) and first_model is not None:
+                offset = float(first_model.predict([[lo]])[0]) - lo
+                y_corr[below] = y_pred[below] + offset
+            above = y_pred > hi
+            if np.any(above) and last_model is not None:
+                offset = float(last_model.predict([[hi]])[0]) - hi
+                y_corr[above] = y_pred[above] + offset
+
         if corr_model.get('clip_to_train_range'):
             y_min = corr_model.get('y_min')
             y_max = corr_model.get('y_max')
@@ -117,6 +143,7 @@ class SegmentedLinearCorrector(CorrectionModule):
             'method': 'segmented_linear',
             'n_segments': len(corr_model.get('segment_models', [])),
             'clip_to_train_range': bool(corr_model.get('clip_to_train_range')),
+            'edge_mode': corr_model.get('edge_mode', 'raw'),
             'y_min': corr_model.get('y_min'),
             'clip_max': corr_model.get('y_max'),
         }

@@ -38,11 +38,12 @@ def test_auto_picks_gpu_for_large_data(monkeypatch):
     assert out.get('task_type') == 'GPU'
 
 
-def test_auto_no_gpu_falls_back_to_cpu():
-    # Even without a GPU machine, the logic should be safe
+def test_auto_no_gpu_falls_back_to_cpu(monkeypatch):
+    """Force the no-GPU branch regardless of the host hardware."""
+    import catboost.utils
+    monkeypatch.setattr(catboost.utils, 'get_gpu_device_count', lambda: 0)
     out = _get_catboost_task_type('auto', n_samples=10_000_000)
-    # If no GPU available -> {}; if GPU available -> GPU. Either is valid.
-    assert out == {} or out.get('task_type') == 'GPU'
+    assert out == {}
 
 
 def test_threshold_env_override(monkeypatch):
@@ -82,3 +83,24 @@ def test_resolve_runtime_params_small_data_cpu(monkeypatch):
     resolved = m._resolve_runtime_params(n_samples=200)
     assert 'task_type' not in resolved  # CPU path
     assert 'thread_count' in resolved   # CPU gets thread_count
+
+
+def test_user_thread_count_not_overridden(monkeypatch):
+    """A user-supplied thread_count must survive runtime resolution."""
+    import catboost.utils
+    monkeypatch.setattr(catboost.utils, 'get_gpu_device_count', lambda: 0)
+    m = CatBoostModel(iterations=10, depth=3, task_type='auto', thread_count=3)
+    resolved = m._resolve_runtime_params(n_samples=200)
+    assert resolved['thread_count'] == 3
+
+
+def test_user_kwargs_win_over_computed(monkeypatch):
+    """Explicit user kwargs take precedence in the final param merge."""
+    import catboost.utils
+    monkeypatch.setattr(catboost.utils, 'get_gpu_device_count', lambda: 1)
+    monkeypatch.setenv('ML_CATBOOST_GPU_MIN_SAMPLES', '100')
+    m = CatBoostModel(iterations=10, depth=3, task_type='auto', gpu_devices='0',
+                      devices='1')
+    resolved = m._resolve_runtime_params(n_samples=50_000)
+    assert resolved.get('task_type') == 'GPU'   # computed from auto + large data
+    assert resolved.get('devices') == '1'       # user kwarg beats gpu_devices pref

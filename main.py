@@ -76,7 +76,25 @@ def load_data(config, feature_set='Liquid'):
     y_T = df[config['target_T']].values.astype(np.float64)
     y_P = df[config['target_P']].values.astype(np.float64)
 
-    X = np.nan_to_num(X, nan=0.0)
+    # S4 (V8): missing measurements must not be silently zero-filled (V7 used
+    # np.nan_to_num here). Exact zeros in the source CSV are the upstream
+    # convention for not-analyzed / below-detection oxides (e.g. Cr2O3.cpx is
+    # 0 in 1102/2079 rows) and are deliberately kept as numeric zero; a NaN,
+    # however, means the dataset changed and needs an explicit imputation
+    # decision (trees/CatBoost tolerate NaN natively, Ridge and StandardScaler
+    # semantics do not), so fail loudly instead of guessing.
+    nan_counts = np.isnan(X).sum(axis=0)
+    if nan_counts.any():
+        bad = {feature_cols[i]: int(c) for i, c in enumerate(nan_counts) if c > 0}
+        raise ValueError(
+            f"NaN found in feature columns {bad}; this benchmark has no "
+            "imputation policy — clean the data or add one explicitly."
+        )
+    if np.isnan(y_T).any() or np.isnan(y_P).any():
+        raise ValueError(
+            f"NaN found in targets: {config['target_T']}={int(np.isnan(y_T).sum())}, "
+            f"{config['target_P']}={int(np.isnan(y_P).sum())}."
+        )
 
     print(f"  Feature set: {feature_set} ({len(feature_cols)} features)")
     print(f"  Data shape: X={X.shape}")
@@ -285,6 +303,13 @@ def run_quick_test():
 
     summary_df = pd.concat(all_results, ignore_index=True)
 
+    matrix.save_config(test_configs, extra_info={
+        'mode': 'quick_test',
+        'n_splits': 2,
+        'random_seed': test_config['random_seed'],
+        'test_split': split_info,
+    })
+
     print("\n" + "=" * 70)
     print("Quick test completed.")
     print("=" * 70)
@@ -340,6 +365,10 @@ if __name__ == '__main__':
         parser = argparse.ArgumentParser(description='Benchmark Protocol')
         parser.add_argument('--test', action='store_true', help='Run quick test')
         args = parser.parse_args()
+
+        if args.test:
+            # SPEC §11.4: quick test caps threads at 4 unless the user chose.
+            os.environ.setdefault('ML_N_JOBS', '4')
 
         _print_runtime_banner()
 
