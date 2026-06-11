@@ -30,8 +30,13 @@ CONFIG = get_config_dict()
 # ============================================================
 # ============================================================
 
-def get_experiment_configs():
-    """get_experiment_configs function."""
+def get_experiment_configs(tier='full'):
+    """get_experiment_configs function.
+
+    tier='fast' (H4) overlays smoke-test model params; its only caller is
+    run_quick_test. main() has no tier parameter, so the fast tier is
+    unreachable for the E01-E12 benchmark.
+    """
     from src.protocol import ExperimentConfig
 
     final_configs = []
@@ -46,7 +51,7 @@ def get_experiment_configs():
                 feature_set=fset,
                 # random_seed omitted: protocol._apply_seed injects per-target seed at runtime
                 data_params=build_data_params(CONFIG, base['data'], fset),
-                model_params=build_model_params(CONFIG, base['model']),
+                model_params=build_model_params(CONFIG, base['model'], tier=tier),
                 run_uncertainty=False,
             ))
 
@@ -151,8 +156,14 @@ def prepare_splits(X, y_T, y_P, config):
 # ============================================================
 # ============================================================
 
-def main():
-    """main function."""
+def main(reuse_fits=False):
+    """main function.
+
+    reuse_fits=True (H6, opt-in) reuses outer-CV fits and the persisted
+    full fit between experiments that differ only in correction module
+    (E10-E12 consume E07-E09); training_time columns then carry the
+    producer's measurements.
+    """
     print("=" * 70)
     print("Chapter 3 Benchmark Protocol - Modular Validation Framework")
     print("=" * 70)
@@ -207,6 +218,7 @@ def main():
             y_P_test=y_P_test,
             random_seed=CONFIG['random_seed'],
             verbose=True,
+            reuse_identical_fits=reuse_fits,
         )
 
         all_results.append(summary_df)
@@ -237,10 +249,14 @@ def main():
     return summary_df
 
 
-def run_quick_test():
-    """run_quick_test function."""
+def run_quick_test(tier='fast'):
+    """run_quick_test function.
+
+    tier (H4): 'fast' (default) uses FAST_TIER_OVERRIDES for ~10x cheaper
+    smoke fits; 'full' reproduces the pre-H4 quick-test behavior.
+    """
     print("=" * 70)
-    print("Quick-test mode (2 folds, 4 experiments)")
+    print(f"Quick-test mode (2 folds, 4 experiments, model tier: {tier})")
     print("=" * 70)
 
     test_config = CONFIG.copy()
@@ -256,7 +272,7 @@ def run_quick_test():
     test_idx = split_data['test_idx']
     tp_bins_train = split_data['tp_bins_train']
 
-    all_configs = get_experiment_configs()
+    all_configs = get_experiment_configs(tier=tier)
     test_configs = [c for c in all_configs if any(c.exp_id.startswith(f"E{i:02d}") for i in [1, 2])]
     print(f"\nNumber of quick-test experiments: {len(test_configs)}")
 
@@ -305,6 +321,7 @@ def run_quick_test():
 
     matrix.save_config(test_configs, extra_info={
         'mode': 'quick_test',
+        'model_tier': tier,
         'n_splits': 2,
         'random_seed': test_config['random_seed'],
         'test_split': split_info,
@@ -352,7 +369,9 @@ def _print_runtime_banner():
         reserve = os.environ.get('ML_RESERVE_CORES', '0')
         cap = os.environ.get('ML_N_JOBS', '(none)')
         outer = os.environ.get('ML_OUTER_PROCS', '1')
-        print(f"  env: ML_RESERVE_CORES={reserve} ML_N_JOBS={cap} ML_OUTER_PROCS={outer}")
+        stacking_par = os.environ.get('ML_STACKING_PARALLEL', '(none)')
+        print(f"  env: ML_RESERVE_CORES={reserve} ML_N_JOBS={cap} "
+              f"ML_OUTER_PROCS={outer} ML_STACKING_PARALLEL={stacking_par}")
     except Exception as exc:
         print(f"  (runtime banner failed: {exc})")
 
@@ -364,7 +383,20 @@ if __name__ == '__main__':
     try:
         parser = argparse.ArgumentParser(description='Benchmark Protocol')
         parser.add_argument('--test', action='store_true', help='Run quick test')
+        parser.add_argument('--tier', choices=['fast', 'full'], default=None,
+                            help='Model parameter tier for --test mode (default: fast). '
+                                 'H4: fast tier never applies to the full benchmark.')
+        parser.add_argument('--reuse-fits', action='store_true',
+                            help='H6 (opt-in): reuse outer-CV fits between experiments that '
+                                 'differ only in correction module (E10-E12 reuse E07-E09). '
+                                 'training_time columns then carry producer measurements.')
         args = parser.parse_args()
+
+        if args.tier is not None and not args.test:
+            parser.error('--tier is only valid together with --test')
+        if args.reuse_fits and args.test:
+            parser.error('--reuse-fits applies to the full benchmark only (E01/E02 have no '
+                         'correction-only siblings, so the quick test never reuses fits)')
 
         if args.test:
             # SPEC §11.4: quick test caps threads at 4 unless the user chose.
@@ -373,9 +405,9 @@ if __name__ == '__main__':
         _print_runtime_banner()
 
         if args.test:
-            run_quick_test()
+            run_quick_test(tier=args.tier or 'fast')
         else:
-            main()
+            main(reuse_fits=args.reuse_fits)
     except Exception:
         logger.exception("Main entrypoint failed")
         raise

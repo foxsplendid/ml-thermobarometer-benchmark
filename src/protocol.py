@@ -57,6 +57,42 @@ def _call_pipeline_factory(factory: Callable, seed: int, fold_idx: int = 0) -> '
     except TypeError:
         return factory()
 
+
+def _canon(value: Any) -> Any:
+    """Recursively convert dicts/lists into hashable, order-stable tuples (H6).
+
+    Scalar leaves are type-tagged: 1 == 1.0 == True under Python equality,
+    but e.g. sklearn max_features=1 (one feature) and 1.0 (all features) are
+    different fits, so they must not share a cache key. A str can never
+    equal one of these tag tuples, so no new collisions are introduced.
+    """
+    if isinstance(value, dict):
+        return tuple(sorted(
+            ((k, _canon(v)) for k, v in value.items()),
+            key=lambda kv: str(kv[0]),
+        ))
+    if isinstance(value, (list, tuple)):
+        return tuple(_canon(v) for v in value)
+    if isinstance(value, (bool, int, float)):
+        return (type(value).__name__, value)
+    return value
+
+
+def _fit_cache_key(config: 'ExperimentConfig', target_name: str) -> tuple:
+    """H6: identity of everything that enters Pipeline.fit for one target.
+
+    corr_module / corr_params are deliberately excluded — correction is a
+    post-OOF transform and never reaches the fit path, which is exactly why
+    experiments differing only in correction can share their fits.
+    """
+    return (
+        config.data_module_name.lower(),
+        config.model_module_name.lower(),
+        _canon(config.data_params),
+        _canon(config.model_params),
+        target_name,
+    )
+
 # ============================================================
 # ============================================================
 
@@ -327,8 +363,20 @@ class StratifiedCVProtocol:
             uncertainty_module: Optional[UncertaintyModule] = None,
             corr_module: Optional[CorrectionModule] = None,
             stratify_labels: Optional[np.ndarray] = None,
-            verbose: bool = True) -> Dict[str, Any]:
-        """run function."""
+            verbose: bool = True,
+            *,
+            precomputed_folds: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """run function.
+
+        precomputed_folds (H6, keyword-only): slim fold records
+        (fold_id/train_idx/val_idx/y_val/y_pred_raw/training_time) from a
+        prior run with identical fit-relevant inputs. When given, the outer
+        fold-fit loop is skipped and OOF predictions are rebuilt from the
+        records; everything downstream (aggregate corrector, nested
+        correction — which still refits genuinely — fold metrics,
+        predictions) runs unchanged. Mutually exclusive with
+        uncertainty_module, which needs live per-fold pipelines.
+        """
         from .correction_modules import NoCorrection
 
         # --- S2: unify sparse-bin handling with the sub-experiment tools ---
@@ -343,61 +391,79 @@ class StratifiedCVProtocol:
                 print(f"  Merged sparse P-T bins: {n_unique_before} -> {n_unique_after} "
                       f"(min_samples_per_bin={min_bin})")
 
-        if stratify_labels is None:
-            logger.warning(
-                "stratify_labels=None: using plain KFold instead of StratifiedKFold; "
-                "this may cause imbalanced folds."
-            )
-            splitter = KFold(
-                n_splits=self.n_splits,
-                shuffle=True,
-                random_state=self.random_seed
-            )
-            split_iter = splitter.split(X)
+        if precomputed_folds is not None:
+            if uncertainty_module is not None:
+                raise ValueError(
+                    "precomputed_folds cannot be combined with an "
+                    "uncertainty_module: the MC path needs live per-fold "
+                    "pipelines and mutates them via set_correction."
+                )
+            # H6: adopt the producer's slim records (no 'pipeline'/'X_val'
+            # keys) and rebuild the OOF vector; the NaN completeness check
+            # below stays the structural guard that the records cover every
+            # sample. training_times carry the producer's measurements.
+            oof_pred_raw = np.full(len(y), np.nan, dtype=np.float64)
+            fold_records = [dict(record) for record in precomputed_folds]
+            training_times = []
+            for record in fold_records:
+                oof_pred_raw[record['val_idx']] = record['y_pred_raw']
+                training_times.append(record['training_time'])
         else:
-            splitter = StratifiedKFold(
-                n_splits=self.n_splits,
-                shuffle=True,
-                random_state=self.random_seed
-            )
-            split_iter = splitter.split(X, stratify_labels)
+            if stratify_labels is None:
+                logger.warning(
+                    "stratify_labels=None: using plain KFold instead of StratifiedKFold; "
+                    "this may cause imbalanced folds."
+                )
+                splitter = KFold(
+                    n_splits=self.n_splits,
+                    shuffle=True,
+                    random_state=self.random_seed
+                )
+                split_iter = splitter.split(X)
+            else:
+                splitter = StratifiedKFold(
+                    n_splits=self.n_splits,
+                    shuffle=True,
+                    random_state=self.random_seed
+                )
+                split_iter = splitter.split(X, stratify_labels)
 
-        oof_pred_raw = np.full(len(y), np.nan, dtype=np.float64)
-        fold_records = []
-        training_times = []
+            oof_pred_raw = np.full(len(y), np.nan, dtype=np.float64)
+            fold_records = []
+            training_times = []
 
-        for fold_idx, (train_idx, val_idx) in enumerate(split_iter):
-            if verbose:
-                print(f"  Fold {fold_idx + 1}/{self.n_splits}: ", end="")
+            for fold_idx, (train_idx, val_idx) in enumerate(split_iter):
+                if verbose:
+                    print(f"  Fold {fold_idx + 1}/{self.n_splits}: ", end="")
 
-            start_time = time.time()
+                start_time = time.time()
 
-            X_train, X_val = X[train_idx], X[val_idx]
-            y_train, y_val = y[train_idx], y[val_idx]
-            stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
+                X_train, X_val = X[train_idx], X[val_idx]
+                y_train, y_val = y[train_idx], y[val_idx]
+                stratify_train = stratify_labels[train_idx] if stratify_labels is not None else None
 
-            pipeline = _call_pipeline_factory(pipeline_factory, self.random_seed, fold_idx)
-            fold_seed = self.random_seed + fold_idx
-            pipeline.fit(X_train, y_train, stratify_labels=stratify_train, fold_seed=fold_seed)
+                pipeline = _call_pipeline_factory(pipeline_factory, self.random_seed, fold_idx)
+                fold_seed = self.random_seed + fold_idx
+                pipeline.fit(X_train, y_train, stratify_labels=stratify_train, fold_seed=fold_seed)
 
-            X_val_scaled, _ = pipeline.data_module.transform(X_val, pipeline._state)
-            y_pred_raw = pipeline.predict(X_val_scaled, apply_correction=False)
+                X_val_scaled, _ = pipeline.data_module.transform(X_val, pipeline._state)
+                y_pred_raw = pipeline.predict(X_val_scaled, apply_correction=False)
 
-            oof_pred_raw[val_idx] = y_pred_raw
+                oof_pred_raw[val_idx] = y_pred_raw
 
-            fold_time = time.time() - start_time
-            training_times.append(fold_time)
+                fold_time = time.time() - start_time
+                training_times.append(fold_time)
 
-            fold_records.append({
-                'fold_id': fold_idx,
-                'train_idx': train_idx,
-                'val_idx': val_idx,
-                'y_val': y_val,
-                'y_pred_raw': y_pred_raw,
-                'pipeline': pipeline,
-                'X_val': X_val,
-                'training_time': fold_time,
-            })
+                fold_records.append({
+                    'fold_id': fold_idx,
+                    'train_idx': train_idx,
+                    'val_idx': val_idx,
+                    'y_val': y_val,
+                    'y_pred_raw': y_pred_raw,
+                    'pipeline': pipeline,
+                    'X_val': X_val,
+                    'training_time': fold_time,
+                })
 
         if np.any(np.isnan(oof_pred_raw)):
             raise RuntimeError("OOF prediction contains NaN values.")
@@ -555,13 +621,29 @@ class ExperimentMatrix:
                         min_samples_per_bin: Optional[int] = None,
                         nested_correction: bool = True,
                         inner_correction_cv: int = 5,
-                        verbose: bool = True) -> pd.DataFrame:
-        """run_experiments function."""
+                        verbose: bool = True,
+                        *,
+                        reuse_identical_fits: bool = False) -> pd.DataFrame:
+        """run_experiments function.
+
+        reuse_identical_fits (H6, keyword-only, default False): within this
+        call, experiments whose data/model params and target match an
+        earlier experiment (i.e. they differ only in correction module)
+        reuse its outer-CV fold fits, persisted full fit and raw test-set
+        predictions instead of recomputing them. Off by default; when on,
+        training_time columns of consumer experiments carry the producer's
+        measurements. Experiments with run_uncertainty neither produce nor
+        consume cache entries.
+        """
         from .data_modules import get_data_module
         from .model_modules import get_model_module
         from .correction_modules import get_correction_module
         from .uncertainty_modules import MCUncertaintyEstimator
-        
+
+        # H6: cache lifetime = this call (X/y/stratify/n_splits/random_seed
+        # are constant within it, so they need not enter the key).
+        fit_cache: Dict[tuple, Dict[str, Any]] = {}
+
         all_results = []
         
         for config in configs:
@@ -629,57 +711,119 @@ class ExperimentMatrix:
                     inner_correction_cv=inner_correction_cv,
                 )
                 corr_module = get_correction_module(config.corr_module_name, **config.corr_params)
+
+                # H6: look up an identical-fit producer from this call.
+                cache_key = None
+                reuse_entry = None
+                if reuse_identical_fits and not config.run_uncertainty:
+                    cache_key = _fit_cache_key(config, target_name)
+                    reuse_entry = fit_cache.get(cache_key)
+                    if reuse_entry is not None:
+                        print(f"  [reuse] outer-CV fits reused from {reuse_entry['producer_exp_id']}")
+
                 results = protocol.run(
                     self.X, y,
                     pipeline_factory,
                     uncertainty_module=unc_module,
                     corr_module=corr_module,
                     stratify_labels=stratify_labels,
-                    verbose=verbose
+                    verbose=verbose,
+                    precomputed_folds=(
+                        reuse_entry['fold_records_slim'] if reuse_entry is not None else None
+                    ),
                 )
-                
+
                 results['fold_metrics'].to_csv(
                     os.path.join(self.output_dir, f'{config.exp_id}_{target_name}_fold_metrics.csv'),
                     index=False
                 )
-                
+
                 results['predictions'].to_parquet(
                     os.path.join(self.output_dir, f'{config.exp_id}_{target_name}_predictions.parquet'),
                     index=False
                 )
-                
+
                 import joblib
                 models_dir = os.path.join(self.output_dir, 'models')
                 os.makedirs(models_dir, exist_ok=True)
-
-                full_pipeline = _call_pipeline_factory(pipeline_factory, target_seed)
-                full_pipeline.fit(self.X, y, stratify_labels=stratify_labels)
-                full_pipeline.set_correction(results['corr_module'], results['corr_model'])
-
                 model_path = os.path.join(models_dir, f'{config.exp_id}_{target_name}_model.joblib')
-                joblib.dump({
-                    'model': full_pipeline.get_model(),
-                    'model_module': full_pipeline.model_module,
-                    'corr_model': results['corr_model'],
-                    'data_state': full_pipeline._state,
-                    'config': {
+
+                y_test = y_T_test if target_name == 'T' else y_P_test
+                y_test_pred_raw = None
+
+                if reuse_entry is not None:
+                    # The producer's full fit is deterministic-identical to
+                    # what a refit would produce; only corr_model and config
+                    # are this experiment's own.
+                    artifact = joblib.load(reuse_entry['model_path'])
+                    artifact['corr_model'] = results['corr_model']
+                    artifact['config'] = {
                         'exp_id': config.exp_id,
                         'data_module': config.data_module_name,
                         'model_module': config.model_module_name,
                         'corr_module': config.corr_module_name,
                         'feature_set': config.feature_set,
-                    },
-                }, model_path)
+                    }
+                    joblib.dump(artifact, model_path)
 
-                y_test = y_T_test if target_name == 'T' else y_P_test
-                if X_test is not None and y_test is not None:
-                    X_test_scaled, _ = full_pipeline.data_module.transform(X_test, full_pipeline._state)
-                    y_test_pred_raw = full_pipeline.predict(X_test_scaled, apply_correction=False)
-                    y_test_pred_corr = full_pipeline.corr_module.apply(full_pipeline._corr_model, y_test_pred_raw)
-                    test_metrics = compute_all_metrics(y_test, y_test_pred_corr, y_test_pred_raw)
-                    for k, v in test_metrics.items():
-                        exp_result[f'{target_name}_test_{k}'] = v
-                
+                    y_test_pred_raw = reuse_entry['y_test_pred_raw']
+                    if X_test is not None and y_test is not None and y_test_pred_raw is not None:
+                        y_test_pred_corr = results['corr_module'].apply(
+                            results['corr_model'], y_test_pred_raw
+                        )
+                        test_metrics = compute_all_metrics(y_test, y_test_pred_corr, y_test_pred_raw)
+                        for k, v in test_metrics.items():
+                            exp_result[f'{target_name}_test_{k}'] = v
+                else:
+                    full_pipeline = _call_pipeline_factory(pipeline_factory, target_seed)
+                    full_pipeline.fit(self.X, y, stratify_labels=stratify_labels)
+                    full_pipeline.set_correction(results['corr_module'], results['corr_model'])
+
+                    joblib.dump({
+                        'model': full_pipeline.get_model(),
+                        'model_module': full_pipeline.model_module,
+                        'corr_model': results['corr_model'],
+                        'data_state': full_pipeline._state,
+                        'config': {
+                            'exp_id': config.exp_id,
+                            'data_module': config.data_module_name,
+                            'model_module': config.model_module_name,
+                            'corr_module': config.corr_module_name,
+                            'feature_set': config.feature_set,
+                        },
+                    }, model_path)
+
+                    if X_test is not None and y_test is not None:
+                        X_test_scaled, _ = full_pipeline.data_module.transform(X_test, full_pipeline._state)
+                        y_test_pred_raw = full_pipeline.predict(X_test_scaled, apply_correction=False)
+                        y_test_pred_corr = full_pipeline.corr_module.apply(full_pipeline._corr_model, y_test_pred_raw)
+                        test_metrics = compute_all_metrics(y_test, y_test_pred_corr, y_test_pred_raw)
+                        for k, v in test_metrics.items():
+                            exp_result[f'{target_name}_test_{k}'] = v
+
+                    # H6: store a slim producer entry (arrays copied so later
+                    # consumers cannot share mutable state; models stay on disk).
+                    if cache_key is not None:
+                        fit_cache[cache_key] = {
+                            'fold_records_slim': [
+                                {
+                                    'fold_id': r['fold_id'],
+                                    'train_idx': np.array(r['train_idx'], copy=True),
+                                    'val_idx': np.array(r['val_idx'], copy=True),
+                                    'y_val': np.array(r['y_val'], copy=True),
+                                    'y_pred_raw': np.array(r['y_pred_raw'], copy=True),
+                                    'training_time': r['training_time'],
+                                }
+                                for r in results['fold_records']
+                            ],
+                            'model_path': model_path,
+                            'y_test_pred_raw': (
+                                np.array(y_test_pred_raw, copy=True)
+                                if y_test_pred_raw is not None else None
+                            ),
+                            'producer_exp_id': config.exp_id,
+                        }
+
                 for k, v in results['summary'].items():
                     exp_result[f'{target_name}_{k}'] = v
 

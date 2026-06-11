@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Model-module implementations for baseline and ensemble regressors."""
 
+import logging
 import os
 import time
 import numpy as np
@@ -9,6 +10,8 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from .interfaces import ModelModule
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -284,15 +287,86 @@ class StrictOOFStacking(ModelModule):
                  meta_model: Optional[ModelModule] = None,
                  inner_cv: int = 5,
                  use_meta_scaler: bool = True,
-                 random_seed: int = 42):
-        """__init__ function."""
+                 random_seed: int = 42,
+                 inner_parallel: Optional[int] = None):
+        """__init__ function.
+
+        inner_parallel (H7): number of concurrent (fold x base-model) fit
+        workers. None (default) reads ENV ML_STACKING_PARALLEL (default 1);
+        <=1 keeps the V7/V8 sequential loop verbatim. When >1, the worker
+        count is clamped to suggest_n_jobs('inner_loop') and each base
+        model's thread budget defaults to budget // workers — but params
+        that already carry a thread count are left untouched (notably
+        config.ModelDefaults.ert pins n_jobs=4), so the no-oversubscription
+        guarantee only holds for workers <= budget // <largest explicit
+        thread count>; a warning is logged when an explicit value exceeds
+        the per-worker share. CatBoost with task_type='auto' is pinned to
+        CPU in parallel mode (concurrent workers must not share one GPU);
+        an explicit 'GPU' is honored with a warning.
+        Note: under parallel fits the per-base-module _training_time field
+        is subject to a benign race and carries no meaning.
+        """
+        from .runtime import _env_int, suggest_n_jobs
+
         self.inner_cv = inner_cv
         self.use_meta_scaler = use_meta_scaler
         self.random_seed = random_seed
-        
+
+        if inner_parallel is None:
+            inner_parallel = _env_int("ML_STACKING_PARALLEL", 1) or 1
+        inner_parallel = max(1, int(inner_parallel))
+        if inner_parallel > 1:
+            # per_fit floors at 1 below, so cap the workers themselves to
+            # keep workers x per_fit within the single-fit envelope.
+            inner_parallel = min(inner_parallel, suggest_n_jobs("inner_loop"))
+        self.inner_parallel = inner_parallel
+
         if base_models is not None:
             self.base_models = base_models
+            if self.inner_parallel > 1:
+                logger.warning(
+                    "inner_parallel=%d with pre-built base_models: thread "
+                    "budgets are not adjusted; the caller is responsible "
+                    "for avoiding oversubscription.", self.inner_parallel
+                )
         elif base_model_params is not None:
+            if self.inner_parallel > 1:
+                # H7: split the inner-loop budget across workers so that
+                # workers x per-fit threads <= suggest_n_jobs('inner_loop').
+                per_fit = max(1, suggest_n_jobs("inner_loop") // self.inner_parallel)
+                adjusted: Dict[str, Dict[str, Any]] = {}
+                for key, params in base_model_params.items():
+                    p = dict(params)
+                    if key in ("ert", "rf"):
+                        kept = p.setdefault("n_jobs", per_fit)
+                        if isinstance(kept, int) and (kept < 0 or kept > per_fit):
+                            logger.warning(
+                                "H7: base model %r keeps explicit n_jobs=%r above the "
+                                "per-worker budget %d; %d workers may oversubscribe.",
+                                key, kept, per_fit, self.inner_parallel,
+                            )
+                    elif key == "catboost":
+                        # Lands in _user_kwargs and suppresses the fit-time
+                        # suggest_n_jobs('model') injection.
+                        kept = p.setdefault("thread_count", per_fit)
+                        if isinstance(kept, int) and (kept < 0 or kept > per_fit):
+                            logger.warning(
+                                "H7: base model 'catboost' keeps explicit thread_count=%r "
+                                "above the per-worker budget %d; %d workers may "
+                                "oversubscribe.", kept, per_fit, self.inner_parallel,
+                            )
+                        # Concurrent workers must not auto-select one shared GPU.
+                        task_pref = str(p.get("task_type", "auto")).strip().lower()
+                        if task_pref == "auto":
+                            p["task_type"] = "CPU"
+                        elif task_pref == "gpu":
+                            logger.warning(
+                                "H7: inner_parallel=%d with explicit task_type='GPU': "
+                                "concurrent trainings on one device are the caller's "
+                                "responsibility.", self.inner_parallel,
+                            )
+                    adjusted[key] = p
+                base_model_params = adjusted
             registry = _build_base_model_registry(random_seed)
             self.base_models = []
             for key, params in base_model_params.items():
@@ -343,16 +417,42 @@ class StrictOOFStacking(ModelModule):
             split_iter = splitter.split(X_train)
 
         oof_meta = np.zeros((n_samples, n_base))
-        
-        for fold_idx, (inner_train_idx, inner_val_idx) in enumerate(split_iter):
-            X_it, y_it = X_train[inner_train_idx], y_train[inner_train_idx]
-            X_iv = X_train[inner_val_idx]
-            
-            w_it = sample_weights[inner_train_idx] if sample_weights is not None else None
-            
-            for j, base_module in enumerate(self.base_models):
-                model = base_module.fit(X_it, y_it, w_it)
-                oof_meta[inner_val_idx, j] = base_module.predict(model, X_iv)
+
+        if self.inner_parallel <= 1:
+            for fold_idx, (inner_train_idx, inner_val_idx) in enumerate(split_iter):
+                X_it, y_it = X_train[inner_train_idx], y_train[inner_train_idx]
+                X_iv = X_train[inner_val_idx]
+
+                w_it = sample_weights[inner_train_idx] if sample_weights is not None else None
+
+                for j, base_module in enumerate(self.base_models):
+                    model = base_module.fit(X_it, y_it, w_it)
+                    oof_meta[inner_val_idx, j] = base_module.predict(model, X_iv)
+        else:
+            # H7: flatten (fold x base) into independent tasks. Each task
+            # constructs its own estimator from a fixed seed, so execution
+            # order cannot change any RNG stream; val_idx slices are pairwise
+            # disjoint per column, so the gather is order-independent.
+            from joblib import Parallel, delayed
+
+            splits = list(split_iter)
+
+            def _fit_one(fold_idx: int, j: int):
+                inner_train_idx, inner_val_idx = splits[fold_idx]
+                w_it = sample_weights[inner_train_idx] if sample_weights is not None else None
+                base_module = self.base_models[j]
+                model = base_module.fit(
+                    X_train[inner_train_idx], y_train[inner_train_idx], w_it
+                )
+                preds = base_module.predict(model, X_train[inner_val_idx])
+                return j, inner_val_idx, preds
+
+            tasks = [(f, j) for f in range(len(splits)) for j in range(n_base)]
+            task_results = Parallel(
+                n_jobs=min(self.inner_parallel, len(tasks)), backend="threading"
+            )(delayed(_fit_one)(f, j) for f, j in tasks)
+            for j, inner_val_idx, preds in task_results:
+                oof_meta[inner_val_idx, j] = preds
         
         self._oof_meta_features = oof_meta.copy()
         
@@ -365,11 +465,20 @@ class StrictOOFStacking(ModelModule):
             oof_meta_scaled = oof_meta
         
         meta_fitted = self.meta_model.fit(oof_meta_scaled, y_train, sample_weights)
-        
-        self._fitted_base_models = []
-        for base_module in self.base_models:
-            model = base_module.fit(X_train, y_train, sample_weights)
-            self._fitted_base_models.append(model)
+
+        if self.inner_parallel <= 1:
+            self._fitted_base_models = []
+            for base_module in self.base_models:
+                model = base_module.fit(X_train, y_train, sample_weights)
+                self._fitted_base_models.append(model)
+        else:
+            from joblib import Parallel, delayed
+            self._fitted_base_models = list(Parallel(
+                n_jobs=min(self.inner_parallel, n_base), backend="threading"
+            )(
+                delayed(base_module.fit)(X_train, y_train, sample_weights)
+                for base_module in self.base_models
+            ))
         
         self._training_time = time.time() - start_time
         
