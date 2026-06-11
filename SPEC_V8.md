@@ -19,10 +19,10 @@
 | H1 | 性能 | 硬件探测层 `runtime.py` | 极低 | 否 |
 | H2 | 性能 | 并行预算分配器 | 低 | 否 (期望加速) |
 | H3 | 性能 | CatBoost 自动设备选择 | 低 | 否 |
-| H4 | 性能 | 模型快速档 | 低 | 否 (`--quick` 才用) |
-| H5 | 性能 | 增广内存/权重模拟 | 中 | 视开关 |
-| H6 | 性能 | 缓存层 | 低 | 否 |
-| H7 | 性能 | Stacking 内层可选并行 | 低 | 否 |
+| H4 | 性能 | 模型快速档 | 低 | 否 (`--test` 快速档才用, §17) |
+| H5 | 性能 | 增广内存/权重模拟 | — | 否 (评估后弃置, §16) |
+| H6 | 性能 | 缓存层 (外层 CV 拟合复用) | 低 | 否 (默认关, §19) |
+| H7 | 性能 | Stacking 内层可选并行 | 低 | 否 (默认关, §18) |
 
 ---
 
@@ -252,17 +252,18 @@ V7 主基准对单样本 P-T bin 不合并,直接喂给 `StratifiedKFold(10)`,sk
 - [x] 回归测试 `tests/test_regression_vs_v7.py` (M4 批补交)
 - [x] 跑现有 `pytest tests/` 确认无回归
 
-### Milestone M2 — 科学修正 (代码完成,V8 基线待跑)
+### Milestone M2 — 科学修正 (完成)
 - [x] S1 nested correction
 - [x] S2 unified sparse-bin merge
-- [ ] 跑一次完整主基准得到 V8 基线,与 V7 对比写入 `CHANGES_FROM_V7.md`
+- [x] 跑一次完整主基准得到 V8 基线,与 V7 对比写入 `CHANGES_FROM_V7.md`
+  (2026-06-11,墙钟 ~7.5 h;对比见 CHANGES M2 节"V8 基线实测对比")
 
 ### Milestone M3 — 性能优化 (H3 完成,其余移至 M3.2)
 - [x] H3 CatBoost 设备策略
-- [ ] H4 模型快速档 (M3.2)
-- [ ] H5 增广内存优化 (M3.2)
-- [ ] H6 缓存层 (M3.2)
-- [ ] H7 stacking 内层并行 (M3.2)
+- [x] H4 模型快速档 (M3.2,§17)
+- [x] H5 增广内存优化 (M3.2,评估后弃置,§16)
+- [x] H6 缓存层 (M3.2,外层 CV 拟合复用,§19)
+- [x] H7 stacking 内层并行 (M3.2,§18)
 
 ### Milestone M4 — 数据/校正语义 (完成,详见 §13–15)
 - [x] S3 EPMA 非负截断
@@ -383,3 +384,269 @@ clip 交互、非法 edge_mode 报错。
 ### Back-compat
 `edge_mode='raw'` 复现 V7;旧持久化模型自动回放旧行为。
 数值影响仅尾部 (E10–E12 的 ~0.06–0.12% 样本),E01–E09 不受影响。
+
+---
+
+## 16. H5 — 增广内存/权重模拟 (M3.2,评估后弃置)
+
+### Why
+M3 遗留项 H5 假设 `AugmentedDataModule` 物化 `(1+n_aug)x` 训练行 (n_aug=15 → 16x float64)
+造成内存/时间负担,候选方案为 float32 存储、流式生成、或以样本权重替代复制。M3.2 立项时
+先按项目真实数据规模量化,结论是该负担不存在,三个候选方案均不成立,**弃置且不引入任何开关**。
+
+### 实测证据 (2026-06-11,cpx 环境,n_jobs=2)
+主基准外层折训练规模 1557 行 (≈1730 × 0.9) × 18 特征 (Liquid 集):
+
+| 量 | 实测值 |
+|---|---|
+| 增广矩阵 X_all (24912 × 18, float64) | **3.59 MB** (y+w 另 0.40 MB) |
+| `fit_transform` 峰值分配 (tracemalloc) | **11.0 MB** |
+| `fit_transform` 耗时 (15 次 `epma_perturb` + vstack + scaler) | **11.9 ms** |
+| ERT fit (raw 1557 行 / aug 24912 行,项目默认超参) | 0.225 s / **2.43 s** |
+| 增广生成占增广管线拟合成本 | **0.5%** |
+| 训出的 ERT 模型 pickle 体积 | **37.2 MB** (数据的 10 倍) |
+
+推论:
+- **内存大头在树模型 (37 MB),不在数据 (3.6 MB)**;H5 三个方案均不触及模型内存。
+- **时间大头是 16x 行数的模型拟合 (10.8x)**——这是"在扰动副本上训练"的科学方法本体,
+  工程上不可消除,只能改 `n_aug` (科学决策,不属于性能项)。
+- 最重负载 `run_stability` (1000 重复 × 2 目标 × 11 次拟合 = 22000 次): 生成总开销
+  ≈ 4.4 分钟,对以模型拟合为主的多小时总时长占比 <1%。即便 `ML_OUTER_PROCS=14` 并发,
+  数据峰值合计 ≈ 154 MB,对本机内存可忽略。
+
+### 三个候选方案逐一否决
+- **权重模拟**: 科学上不可行。15 份副本的 X 各不相同 (`epma_perturb` 乘性高斯噪声),
+  样本权重只能加权既有行,无法表达扰动后的新 X;能被权重化的"精确复制"场景本项目已由
+  `BalancedDataModule` 以权重实现。
+- **float32 存储**: 每次拟合省约 5 MB、省时 ≈0,却**影响数值**——`scaler.transform` 在
+  float32 算术下与"float64 计算后转换"存在末位差,可翻转 ERT 分裂点;CatBoost 特征分箱
+  边界也可能移动。即必须配 opt-in 开关 + 回归验证,接口成本远超收益,违反简洁原则。
+- **流式生成**: `ExtraTreesRegressor.fit` / `catboost.Pool` 均为批式接口,需要完整矩阵
+  驻留内存;流式至多省去 3.6 MB 的临时列表,无意义。
+
+### Verification
+无代码改动 → 无新增测试。既有覆盖保持: `tests/test_data_modules.py` 已验证增广形状、
+fold_seed 确定性、不同 seed 产生不同扰动。本节实测脚本一次性运行,数字记录于此,不入库。
+
+### Back-compat
+不改任何代码、不新增任何参数/环境变量,全部路径逐位不变。若未来 `n_aug` 或数据量增长
+≥50x (增广矩阵进入百 MB 级) 再重启本项,届时优先复测本节表格。stability 工具墙钟时间的
+真实杠杆是外层进程并行 (`ML_OUTER_PROCS`) 与 §18 的 stacking 内层并行,不在 H5。
+
+---
+
+## 17. H4 — 模型快速档 (M3.2)
+
+### Why
+- `main.py --test` 是唯一的端到端冒烟入口,但它沿用科学档模型参数 (ERT 200 树/深 15、
+  CatBoost 1000 迭代/深 6)。实测 (1730 行 Liquid 18 特征、2 线程、机器有底载): CatBoost
+  单拟合 2.31 s、ERT 0.27 s;quick test 共 24 次拟合 (E01/E02 × 2 特征集 × 2 目标 ×
+  [2 折 CV + 1 全量拟合]),纯拟合预算 ~31 s,是 quick test 墙钟的大头。
+- 冒烟测试只验证管线连通与指标有限性,不消费数值质量;为它支付科学档训练成本是纯浪费。
+- 范围相对最初设想 (`ert_fast` 注册键、独立 `--quick` 入口) **收缩**: 不加新模型注册键、
+  不加环境变量、不进 tools/*。重负载 (stability / learning curve / error propagation)
+  是科学路径,**按设计不允许**使用快速档——H4 对它们零收益是目标而非缺陷。
+  (SPEC §0 表中原写 `--quick`;实际入口是既有 `--test`,以 `--tier` 选档。)
+
+### How
+1. **`src/experiment_params.py`** 新增模块常量 `FAST_TIER_OVERRIDES` (快速档唯一真源):
+   ert/rf `n_estimators 200→50, max_depth 15→10`;catboost `iterations 1000→200,
+   depth 6→4, learning_rate 0.03→0.1` (lr 提高部分补偿迭代削减,冒烟指标肉眼可判读,
+   不构成质量承诺);stacking `inner_cv 5→3`。
+2. **`build_model_params(..., tier="full")`**: 仅接受 `'full' | 'fast'`,否则 `ValueError`。
+   `tier='fast'` 在复制 config 默认后 `update(FAST_TIER_OVERRIDES[key])`;stacking 分支对
+   三个基模型逐个套用覆盖 (在 `stacking_base_defaults` 之后,快速档最终生效) 并强制
+   `inner_cv=3`。未覆盖键一律保持 config 默认。**未知模型模块无快速覆盖**: `tier='fast'`
+   对 `{}` 回退分支不做任何事,与 `'full'` 行为一致 (测试钉死)。`tier='full'` (默认)
+   分支零代码改动,返回字典与改动前逐位相同。
+3. **`main.py`**: `get_experiment_configs(tier='full')` 透传;`run_quick_test(tier='fast')`
+   横幅打印 tier、`save_config` extra_info 增 `model_tier`;argparse 新增
+   `--tier {fast,full}` (默认 None),不带 `--test` 时 `parser.error`。`main()` **没有 tier
+   形参**,快速档对 E01–E12 完整基准在代码层面不可达。
+4. **不设环境变量** (有意决策,亦为全项目开关习语边界): 环境变量会泄漏给子进程/兄弟进程
+   (本机常态多 CC 并发),CLI 标志作用域恰好是单次调用。**ML_\* env 只留给核数/线程预算
+   与设备选择** (含既有 H3 的 `ML_CATBOOST_GPU_MIN_SAMPLES`;完整登记处为
+   `src/runtime.py` 模块 docstring);**新行为开关一律走 CLI** (`--tier`、`--reuse-fits`)。
+5. **tools/\* 与 `run_stability_repeats` 零改动**: 四个科学调用点全部不传 `tier`,grep 可证。
+
+### Cost / Benefit (实测,1730×18,2 线程,机器有底载)
+| 拟合 | 科学档 | 快速档 | 加速 |
+|----|----|----|----|
+| ERT 单拟合 | 0.27 s | 0.063 s | 4.3× |
+| CatBoost 单拟合 | 2.31 s | 0.18 s | 12.8× |
+| quick test 拟合预算 (24 次) | ~31 s | ~3 s | ~10.7× |
+
+quick test 端到端 (含 CSV 加载、parquet/joblib 落盘等固定开销) 预期 ~2.5–4×。
+
+### Verification
+`tests/test_experiment_params.py` (7 用例,全部快速、确定性、无 GPU): 默认档与 `'full'`
+逐键相等且钉死科学值;快速档逐键断言 (含 stacking 基模型继承、未覆盖键保持);非法 tier
+报错;未知模块 fast 保持 `{}`;`get_experiment_configs()` 24 配置钉死科学档 (泄漏防护
+回归锚);`get_experiment_configs(tier='fast')` E01/E02 为快速值;快速档参数实例化
+ExtraTrees/CatBoost 并 fit + predict 全有限 (防覆盖键名与构造器失配)。
+手动: `python main.py --test` 横幅显示 `model tier: fast`;`--test --tier full` 复现
+此前 quick test 行为;`--tier` 不带 `--test` 报参数错误。
+
+### Back-compat
+- 科学路径: 仅多一个默认 `tier='full'` 的关键字参数,默认分支返回字典逐位不变,RNG 零接触。
+- quick test 数字会变 (本就非科学产物,落 `results_test/`,无黄金对照): `--tier full`
+  一键复现旧行为;`config_used.yaml` 记录 `model_tier` 供溯源。
+- 旧 joblib 工件: 模型类与 predict 路径零改动。
+
+---
+
+## 18. H7 — Stacking 内层可选并行 (M3.2)
+
+### Why
+- `StrictOOFStacking.fit` 顺序执行 `inner_cv × n_base` (默认 5×3=15) 次基模型拟合 +
+  3 次全量重拟合。每次拟合内部虽占满 `suggest_n_jobs("model")` 线程,但 CatBoost 在本
+  项目数据规模 (augmented 内层折 ≈ 20k×18) 下约 4 线程即饱和——实测 `thread_count=14`
+  1.51 s vs `=4` 1.59 s,>4 的核基本闲置。把这部分浪费换成任务级吞吐: 实测 3 个 CatBoost
+  fit 顺序@14 线程 3.96 s vs 并发 W=3@4 线程 1.74 s = **2.28×**。
+- ERT/RF 是粗粒度树级并行,线程扩展性好,外层并行对它们 ≈1×;CatBoost 占 augmented 内层
+  fit 约 1/3 时间 → 单次 stacking fit 期望 **1.2–1.5×**。
+- 收益集中: E12 的 nested correction (S1) 把每 target 的 stacking fit 提高到 61 次,是
+  主基准最贵单项;`run_learning_curve` 默认含 stacking (3000 次 fit);`run_stability
+  --model-module stacking` 为 22000 次 fit。
+
+### How
+1. **`StrictOOFStacking.__init__`** 增加 `inner_parallel: Optional[int] = None`:
+   None → 经 `runtime._env_int("ML_STACKING_PARALLEL", 1)` 读 ENV (该变量已登记进
+   `runtime.py` 模块 docstring 的 env 清单);解析失败或 ≤1 一律视为关闭 (顺序)。
+   **>1 时 worker 数钳制到 `suggest_n_jobs('inner_loop')`** (per_fit 下界为 1,若不钳制
+   workers,`W > budget` 时 W×1 会突破单拟合包络)。不提供 "auto" 档、不加 CLI flag。
+2. **线程预算注入** (仅 `base_model_params` 构造路径): `inner_parallel > 1` 时对每份
+   params **复制后** `setdefault`:
+   `per_fit = max(1, suggest_n_jobs("inner_loop") // inner_parallel)`;
+   ert/rf → `n_jobs`,catboost → `thread_count` (进入 `_user_kwargs`,自动抑制 fit 期
+   注入)。**显式传入的线程值不被覆盖** (契约),因此不超订保证**有条件**: 项目 config 给
+   ert 钉了显式 `n_jobs=4` (`config.ModelDefaults.ert`),它不会被除——**对照 config 默认
+   应保持 `W ≤ budget // 4`** (14 核建议 W=3);显式值超过 per_fit 份额时 logger.warning
+   明示可能超订。直接传 `base_models` 实例列表时不调整 (logger.warning),责任在调用方。
+   **预算语义更正**: `suggest_n_jobs('inner_loop')` 尊重 `ML_N_JOBS` / `ML_RESERVE_CORES`;
+   **只有 `'cross_proc'` 上下文除以 `ML_OUTER_PROCS`**,`'inner_loop'` 不除。多兄弟进程
+   并发跑 stability 分段时,请按既有约定用 `ML_N_JOBS` 为每进程设上限。
+3. **`StrictOOFStacking.fit`** 双分支: `≤1` 时现有顺序循环**逐字保留** (默认路径零代码
+   变化);`>1` 时先 `splits = list(split_iter)` (K 折器产出与惰性消费逐位相同),把
+   (fold × base) 摊平为任务,`joblib.Parallel(backend="threading")` 派发,主线程统一写
+   `oof_meta[val_idx, j]` (各任务切片两两不相交,结果与完成顺序无关);最终全量重拟合循环
+   同法并行。backend 取 threading: 基模型 fit 均为释放 GIL 的原生代码,零数据拷贝,避免
+   Windows loky spawn 开销;joblib 已是既有依赖。
+4. **RNG 不变性**: 每次基模型 fit 用构造期固定整数种子**新建** estimator,无跨 fit 共享
+   顺序 RNG,`model_modules.py` 无任何 `np.random` 全局调用 → 执行顺序不影响任何种子消费。
+5. **共享可变状态**: 并发 fit 时唯一写操作是信息性的 `_training_time` (良性竞态,docstring
+   注明并行模式下该字段无意义);`self.params` / `_user_kwargs` 只读。
+6. **与 nested_correction (S1) 零代码交互**: `protocol._compute_inner_oof` 经 pipeline
+   factory 构造全新 stacking 实例,ENV 默认值自动生效;protocol 外层循环保持串行,任意
+   时刻总并发 = W × per_fit ≤ budget 仍成立。`protocol.py` 无需改动。
+7. **可观测性**: `main.py` 启动横幅 env 行追加 `ML_STACKING_PARALLEL`。
+8. **GPU 守卫 (与 `ML_CATBOOST_GPU_MIN_SAMPLES` 同读)**: augmented 内层折 ≈20k ≥ 阈值
+   5000,`task_type='auto'` 在 GPU 机器上会选 GPU,而并发 worker 争用同一设备可能更慢
+   甚至 OOM——因此并行模式 (`inner_parallel > 1`) 下 **`'auto'` 一律钉到 CPU**;显式
+   `task_type='GPU'` 保留并 logger.warning (责任在调用方)。顺序模式 (默认) 行为不变。
+
+### Cost / 实测收益 (2026-06-11 空闲机验收,16 核 reserve 2,CatBoost 双模式均强制 CPU)
+设计期预测 (单次 augmented fit 1.2–1.5×、E12 wall −15~25%) **被空闲机实测部分推翻**:
+
+| 数据规模 | 顺序 | W=2 | W=3 | W=4 |
+|---|---|---|---|---|
+| raw 1730×18 (E03/E06 场景) | 7.5 s | **5.8 s (1.29×)** | 6.0 s (1.25×) | — |
+| augmented 27.7k×18 (E09/E12 场景) | 45.4 s | **41.4 s (1.10×)** | 49.2 s (0.92×) | 55.2 s (0.82×) |
+
+- 结论: **收益集中在 CatBoost 占比高的小矩阵** (raw/balanced stacking ~1.3×);augmented
+  大矩阵上至多 1.10× (W=2),**W≥3 反而变慢**——设计假设"森林外层并行 ≈1×"在 27.7k 行上
+  不成立: RF/ERT 砍线程的损失 + 内存带宽争用盖过 CatBoost 的任务级收益。
+- **建议值修正: `set ML_STACKING_PARALLEL=2`** (而非设计期的 3);augmented 重负载
+  (stability --model-module stacking) 上收益有限,启用前按本表预期。
+
+### Verification
+1. `tests/test_stacking_parallel.py` (8 用例,合成小数据,秒级): 默认关;ENV 启用;
+   非法 ENV 回退 1;**workers 钳制到预算** (`ML_N_JOBS=2` + `inner_parallel=16` → 2);
+   `inner_parallel=1` vs `3` 在基模型 `n_jobs=1` 钉死下 `_oof_meta_features` 与
+   `predict` **逐位相等**;`ML_N_JOBS=2`+W=2 → 注入 `n_jobs=1`;显式 `n_jobs=3` 不被
+   覆盖;并行模式 catboost `'auto'` 钉 CPU / 显式 `'GPU'` 保留。
+2. 实测数值佐证 (20k×18): CatBoost `thread_count` 14 vs 4 预测**逐位相等**;ERT `n_jobs`
+   14 vs 4 仅 predict 求和顺序差 ≤1 ulp (2.2e-16)。
+3. 空闲机计时复测: **已执行 (2026-06-11)**,结果见上表;真实 stacking 配置 (config 默认
+   超参,含 ert 显式 n_jobs=4) 直接 fit 实测,每模式单次测量。
+
+### Back-compat
+- 默认 (`ML_STACKING_PARALLEL` 未设或 ≤1) 走原顺序循环,逐字未动 → 全部科学路径
+  bit-identical。
+- 开启后为**纯性能开关但非逐位等同**: per-fit 线程数改变 → ERT/RF 预测有 ≤1 ulp 的浮点
+  求和顺序差,CatBoost 实测逐位相等;统计上零影响,但**论文数字生成必须保持默认关闭**,
+  或重跑整套基线后注明。
+- 持久化 joblib 工件不含 inner_parallel 状态,新旧互放不受影响 (predict 路径未改)。
+
+---
+
+## 19. H6 — 外层 CV 拟合复用 (主基准缓存层,M3.2)
+
+### Why
+- 主基准 E10–E12 与 E07–E09 仅差校正模块,而校正是 OOF 之后的后处理,**完全不进入
+  `Pipeline.fit`**。同一次 `run_experiments` 调用内,两组实验的 data_params /
+  model_params / target_seed / 折切分逐项相同 → 外层 10 折拟合、全量拟合 (持久化用)
+  与测试集原始预测是**逐位相同的重复计算**。
+- 实测 (V7 黄金 `metrics_summary.csv` 的 `*_total_training_time`): E10–E12 双特征集
+  T+P 外层折拟合合计 **10,690 s,占全部折拟合时间 25,756 s 的 41.5%** (E09_liq 6,411 s
+  vs E12_liq 6,262 s 近似相等,佐证为同一计算)。V8 默认嵌套校正下 E10–E12 另付 ~4.5×
+  内层拟合 (不可缓存),复用外层拟合仍省全基准 **~14–16%** 墙钟;`nested_correction=False`
+  重放模式下省 **~40%**。
+- 其余负载**无可缓存项** (核查结论,不做缓存): `run_stability_repeats` 每 repeat 种子
+  唯一;`run_learning_curve` fraction=1.0 时行序按 repeat_seed 重排、折成员有意变化;
+  `--test` 只跑 E01/E02 (无校正孪生,故 `--reuse-fits` 与 `--test` 互斥,parser.error)。
+
+### How
+1. **`StratifiedCVProtocol.run`** 新增 **keyword-only** 参数
+   `precomputed_folds: Optional[List[Dict]] = None` (签名以 `*` 隔开,防位置传参破坏):
+   - 非 None 时: 跳过 splitter 构造与外层折循环,采用瘦记录列表 (每条含
+     `fold_id/train_idx/val_idx/y_val/y_pred_raw/training_time`,无 `pipeline`/`X_val`
+     键),由 `val_idx + y_pred_raw` 重建 `oof_pred_raw`;**既有 "OOF prediction contains
+     NaN" 完整性检查显式保留**,是瘦记录覆盖全样本的唯一结构性守卫。后续聚合校正器拟合、
+     嵌套校正 (内层照常经 `pipeline_factory` 真实重训,种子流不变)、fold metrics、
+     predictions_df 全部走既有代码。
+   - 守卫: `precomputed_folds` 与 `uncertainty_module` 互斥 → `ValueError` (不确定度
+     路径需要活 pipeline 并会 `set_correction` 原地改它)。
+2. **`ExperimentMatrix.run_experiments`** 新增 **keyword-only** 参数
+   `reuse_identical_fits: bool = False`:
+   - 函数体内局部 `fit_cache` 字典,生命周期=单次调用 (X/y/stratify/n_splits/random_seed
+     调用内恒定,无需进 key)。
+   - key = `_fit_cache_key(config, target_name)` = (data_module 名, model_module 名,
+     `_canon(data_params)`, `_canon(model_params)`, target);`_canon` 为递归规范化
+     (dict→按键排序 tuple),**标量叶子带类型标签** (1 / 1.0 / True 在 Python 等值但对
+     sklearn 是不同拟合,不得碰撞);**corr_module / corr_params 不进 key**。
+     `run_uncertainty=True` 的实验既不产出也不消费缓存。
+   - **命中**: `protocol.run(..., precomputed_folds=瘦记录)`;跳过 `full_pipeline.fit`,
+     改为 `joblib.load(生产者工件)` 后仅替换 `corr_model` 与 `config` 再 dump 到本实验
+     路径;测试集指标用缓存的 `y_test_pred_raw` + 本实验聚合校正器计算。打印
+     `[reuse] outer-CV fits reused from {producer_exp_id}`。
+   - **未命中**: 走现行路径,结束后存瘦条目 (各数组 copy 防共享可变状态,<1 MB/key)。
+     命中失败永远安全——退化为全量计算 (如消费者排在生产者之前,只是缓存 miss)。
+3. **`main.py`**: argparse 新增 `--reuse-fits` (默认 False,help 注明 timing 列语义),
+   `main(reuse_fits=False)` 透传。`run_quick_test` 与三个 tools **不接**此参数 (无重复
+   计算,接了是虚假接口面)。
+4. **弃选方案**: 盘上缓存 (失效键复杂度不成比例);缓存活 pipeline 对象 (GB 级内存 +
+   uncertainty 原地改);给 tools 加缓存 (收益为 0);实验重排序 (改变 metrics_summary
+   行序,属默认行为变化)。
+
+### Verification
+`tests/test_fit_reuse.py` (5 用例,ert-only 合成小数据 + n_splits=3,全 CPU 确定性,
+默认套件可跑): reuse on/off 的 summary 与 fold_metrics 除 `*training_time*` 外逐位相等
+(嵌套校正开启,连带验证嵌套在 precomputed 路径上照常工作);monkeypatch 计数
+`ExtraTreesModel.fit` 证明 nested off 时 reuse on = 8 次 (仅生产者 2 目标 × (3 折 + 1
+全量)) vs off = 16 次;消费者 joblib 工件与生产者模型预测逐位相同且 `corr_model`/`config`
+为本实验所有;仅 `n_estimators` 不同 → 缓存 miss、双方全量拟合;`precomputed_folds` +
+`uncertainty_module` → `ValueError`。
+手动: `python main.py --reuse-fits` 与默认跑的 `metrics_summary.csv` 对比,除 timing
+列外逐位一致;日志出现 12 行 `[reuse]` (双特征集 × E10–E12 × T/P 双目标)。
+
+### Back-compat
+- **默认关**: 两个新参数均为 keyword-only 且默认 None/False,不进入任何新代码路径,
+  全部科学路径输出逐位不变。
+- 开启时: 科学指标在确定性路径 (ExtraTrees/RF/Ridge/CatBoost-CPU) 上逐位等于不开;
+  CatBoost-GPU 重训本就不保证逐位确定,复用反而消除 E08/E11 间的随机差异——文档注明。
+  **`training_time` / `total_training_time` 列在消费者实验中为生产者的测量值** (同一
+  计算的真实耗时);不同开关状态下的 timing 列不可互相对比 (H7 同理)。
+- 持久化工件: 消费者 joblib 与其全量重训产物内容等价 (同种子同数据的确定性拟合);
+  reused 运行的 `results['fold_records']` 无 `pipeline`/`X_val` 键——仓库内无消费方
+  (uncertainty 路径已被守卫排除),第三方代码若在 `--reuse-fits` 下窥探该字段需注意。

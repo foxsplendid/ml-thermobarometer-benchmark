@@ -10,6 +10,20 @@ Environment variables (precedence order, highest first):
   ML_RESERVE_CORES  Cores to leave free for sibling processes. V8 addition.
   ML_OUTER_PROCS    Number of sibling outer processes (e.g. parallel
                     experiments) sharing this machine. V8 addition.
+                    Only the 'cross_proc' context divides by it.
+  ML_STACKING_PARALLEL  Concurrent (fold x base-model) fit workers inside
+                    StrictOOFStacking (H7, default 1 = sequential). Parsed
+                    in model_modules via this module's _env_int. Workers are
+                    clamped to suggest_n_jobs('inner_loop'); each worker's
+                    thread budget defaults to budget // workers, but params
+                    that explicitly carry a thread count are not reduced
+                    (config.ModelDefaults.ert pins n_jobs=4), so keep
+                    workers <= budget // 4 with the shipped config (a
+                    warning is logged otherwise). CatBoost 'auto' device is
+                    pinned to CPU under parallel workers.
+  ML_CATBOOST_GPU_MIN_SAMPLES  Training-set size below which CatBoost
+                    task_type='auto' stays on CPU (H3, default 5000).
+                    Parsed in model_modules._get_catboost_task_type.
 """
 
 from __future__ import annotations
