@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Slow regression test: V8 in V7-equivalent configuration must reproduce
-the V7 golden numbers (results/metrics_summary.csv).
+the V7 golden numbers (tests/golden_v7_metrics_summary.csv, a frozen mirror
+of the V7-era results/metrics_summary.csv — results/ itself is overwritten
+by the V8 baseline rerun, so the live file can no longer serve as reference).
 
 Run explicitly with:  pytest -m slow tests/test_regression_vs_v7.py
 
@@ -24,7 +26,7 @@ REL_TOL = 1e-4
 
 
 def _golden_path():
-    return os.path.join(os.path.dirname(__file__), "..", "results", "metrics_summary.csv")
+    return os.path.join(os.path.dirname(__file__), "golden_v7_metrics_summary.csv")
 
 
 @pytest.mark.slow
