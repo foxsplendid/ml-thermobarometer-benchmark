@@ -109,3 +109,8 @@ figure/
 # ============================================================
 results/learning_curve/learning_curve_checkpoint*.csv
 results/stability/*_checkpoint_*.csv
+
+# ============================================================
+# Claude Code local tooling
+# ============================================================
+.claude/
