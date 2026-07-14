@@ -10,7 +10,7 @@ catboost==1.2.3
 # Visualization and interpretation
 matplotlib==3.9.2
 seaborn==0.13.2
-shap==0.50.0
+shap==0.46.0
 
 # IO and serialization
 pyarrow==16.1.0

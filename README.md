@@ -86,11 +86,13 @@ ml-thermobarometer-benchmark/
 
 ## 1. Environment Setup
 
-Python >= 3.9 is recommended.
+The benchmark environment is pinned to Python 3.12.3 and managed by [uv](https://docs.astral.sh/uv/).
 
 ```bash
-pip install -r requirements.txt
+uv sync --locked
 ```
+
+`pyproject.toml` and `uv.lock` are the authoritative environment definition; `requirements.txt` is retained as a compatibility mirror.
 
 ## 2. Quick Start
 
@@ -107,44 +109,44 @@ print('OK')
 
 ### 2.2 Quick Test
 ```bash
-python main.py --test
+uv run --locked python main.py --test
 ```
 
 ### 2.3 Main Benchmark (24 experiments)
 ```bash
-python main.py
+uv run --locked python main.py
 ```
 
 ## 3. Sub-Experiment Scripts
 
 ### 3.1 Stability Analysis
 ```bash
-python tools/run_stability.py --exp-id E07_stability_nj4 --model-module ert --data-module augmented --corr-module none --feature-set Liquid --n-repeats 1000
+uv run --locked python tools/run_stability.py --exp-id E07_stability_nj4 --model-module ert --data-module augmented --corr-module none --feature-set Liquid --n-repeats 1000
 ```
 
 Merge segmented runs:
 ```bash
-python tools/run_stability.py --merge-dir results --exp-id E07_stability_nj4 --output-dir results
+uv run --locked python tools/run_stability.py --merge-dir results --exp-id E07_stability_nj4 --output-dir results
 ```
 
 ### 3.2 Learning-Curve Analysis
 ```bash
-python tools/run_learning_curve.py --feature-set liq --models ert stacking --repeats 30 --n-splits 10
+uv run --locked python tools/run_learning_curve.py --feature-set liq --models ert stacking --repeats 30 --n-splits 10
 ```
 
 Merge segmented runs:
 ```bash
-python tools/run_learning_curve.py --merge-dir results/learning_curve --output-dir results/learning_curve
+uv run --locked python tools/run_learning_curve.py --merge-dir results/learning_curve --output-dir results/learning_curve
 ```
 
 ### 3.3 Analysis Error Propagation
 ```bash
-python tools/run_error_propagation.py --exp-id E07_ert_augmented_none_liq --model-module ert --data-module augmented --corr-module none --feature-set Liquid --n-mc 1000
+uv run --locked python tools/run_error_propagation.py --exp-id E07_ert_augmented_none_liq --model-module ert --data-module augmented --corr-module none --feature-set Liquid --n-mc 1000
 ```
 
 ### 3.4 Offline Plotting 
 ```bash
-python tools/plot_offline_figures.py
+uv run --locked python tools/plot_offline_figures.py
 ```
 
 Notes:
